@@ -13,7 +13,7 @@ import logging
 import sqlite3
 import random
 import string
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
 from collections import deque
 from typing import Optional
 
@@ -58,7 +58,8 @@ logger = logging.getLogger(__name__)
     WAITING_JOB_SHOP_NAME, WAITING_JOB_SHOP_DESC,
     WAITING_ADMIN_SHOP_NAME, WAITING_ADMIN_SHOP_DESC, WAITING_ADMIN_SHOP_OWNER,
     WAITING_CARD_NUMBER, WAITING_CARD_HOLDER,
-) = range(33)
+    WAITING_SUB_PERCENT,
+) = range(34)
 
 # ─── DATABASE ──────────────────────────────────────────────────────────────────
 def get_db():
@@ -226,6 +227,16 @@ def init_db():
         is_read INTEGER DEFAULT 0,
         created_at TEXT DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS shop_subscriptions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        shop_id INTEGER UNIQUE,
+        fee_percent REAL DEFAULT 0,
+        last_paid_at TEXT,
+        next_due_at TEXT,
+        total_earned REAL DEFAULT 0,
+        status TEXT DEFAULT 'active'
+    );
     """)
 
     # Default settings
@@ -251,6 +262,18 @@ def migrate_db():
         pass
     try:
         c.execute("ALTER TABLE shops ADD COLUMN card_holder TEXT DEFAULT ''")
+    except:
+        pass
+    try:
+        c.execute("""CREATE TABLE IF NOT EXISTS shop_subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            shop_id INTEGER UNIQUE,
+            fee_percent REAL DEFAULT 0,
+            last_paid_at TEXT,
+            next_due_at TEXT,
+            total_earned REAL DEFAULT 0,
+            status TEXT DEFAULT 'active'
+        )""")
     except:
         pass
     conn.commit()
@@ -2526,6 +2549,7 @@ async def admin_shop_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif s["status"] == "approved":
         buttons.append([InlineKeyboardButton("🚫 Bloklash", callback_data=f"admin_shop_reject_{shop_id}")])
 
+    buttons.append([InlineKeyboardButton("💰 Obuna % sozlash", callback_data=f"admin_sub_{shop_id}")])
     buttons.append([InlineKeyboardButton("💳 To'lov tizimini tahrirlash", callback_data=f"admin_set_payment_{shop_id}")])
     buttons.append([InlineKeyboardButton("🗑 Do'konni o'chirish", callback_data=f"admin_shop_delete_{shop_id}")])
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_shops")])
@@ -2538,13 +2562,29 @@ async def admin_shop_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         card_text = "\n💳 Karta: <i>Kiritilmagan</i>"
 
+    # Obuna ma'lumoti
+    conn2 = get_db()
+    sub = conn2.execute("SELECT * FROM shop_subscriptions WHERE shop_id=?", (shop_id,)).fetchone()
+    conn2.close()
+    if sub:
+        due = sub["next_due_at"][:10] if sub["next_due_at"] else "—"
+        earned = format_price(sub["total_earned"])
+        sub_text = (
+            f"\n\n📅 <b>Obuna:</b> {sub['fee_percent']}% har 30 kun\n"
+            f"🗓 Keyingi to'lov: <b>{due}</b>\n"
+            f"💵 Jami tushgan: <b>{earned}</b>"
+        )
+    else:
+        sub_text = "\n\n📅 <b>Obuna:</b> <i>Belgilanmagan</i>"
+
     await q.edit_message_text(
         f"🏪 <b>{s['name']}</b>\n"
         f"📝 {s['description']}\n"
-        f"Egasi ID: {s['owner_tg_id']}\n"
-        f"Holat: {s['status']}\n"
+        f"👤 Egasi ID: {s['owner_tg_id']}\n"
+        f"📊 Holat: {s['status']}\n"
         f"⭐ {s['rating']:.1f} ({s['total_reviews']} sharh)"
-        f"{card_text}",
+        f"{card_text}"
+        f"{sub_text}",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML"
     )
@@ -2613,6 +2653,160 @@ async def admin_shop_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🗑 Do'kon muvaffaqiyatli o'chirildi.",
         reply_markup=back_kb("admin_shops")
     )
+
+# ─── ADMIN OBUNA TIZIMI (30 KUNLIK %) ─────────────────────────────────────────
+async def admin_sub_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    shop_id = int(q.data.split("_")[2])
+    context.user_data["sub_shop_id"] = shop_id
+
+    conn = get_db()
+    shop = conn.execute("SELECT name FROM shops WHERE id=?", (shop_id,)).fetchone()
+    sub = conn.execute("SELECT * FROM shop_subscriptions WHERE shop_id=?", (shop_id,)).fetchone()
+    conn.close()
+
+    if sub:
+        due = sub["next_due_at"][:10] if sub["next_due_at"] else "—"
+        earned = format_price(sub["total_earned"])
+        cur_info = (
+            f"\n\n📌 Joriy obuna:\n"
+            f"💰 Foiz: <b>{sub['fee_percent']}%</b>\n"
+            f"🗓 Keyingi to'lov: <b>{due}</b>\n"
+            f"💵 Jami tushgan: <b>{earned}</b>\n"
+            f"📊 Holat: {'✅ Faol' if sub['status'] == 'active' else '❌ Nofaol'}"
+        )
+    else:
+        cur_info = "\n\n📌 Obuna hali belgilanmagan."
+
+    await q.edit_message_text(
+        f"💰 <b>'{shop['name'] if shop else ''}' obuna sozlamalari</b>{cur_info}\n\n"
+        f"Har 30 kunda do'kon daromadidan olinadigan foizni kiriting (0-50):\n"
+        f"Masalan: <code>10</code> (10% degani)",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ Orqaga", callback_data=f"admin_shop_{shop_id}")]
+        ])
+    )
+    return WAITING_SUB_PERCENT
+
+async def got_sub_percent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        pct = float(update.message.text.strip().replace("%", ""))
+        if not 0 <= pct <= 50:
+            raise ValueError
+    except:
+        await update.message.reply_text("❌ 0 dan 50 gacha raqam kiriting. Masalan: <code>10</code>", parse_mode="HTML")
+        return WAITING_SUB_PERCENT
+
+    shop_id = context.user_data.pop("sub_shop_id", None)
+    if not shop_id:
+        return ConversationHandler.END
+
+    now = datetime.now()
+    next_due = (now + timedelta(days=30)).isoformat()
+
+    conn = get_db()
+    existing = conn.execute("SELECT id FROM shop_subscriptions WHERE shop_id=?", (shop_id,)).fetchone()
+    if existing:
+        conn.execute(
+            "UPDATE shop_subscriptions SET fee_percent=?, next_due_at=?, status='active' WHERE shop_id=?",
+            (pct, next_due, shop_id)
+        )
+    else:
+        conn.execute(
+            "INSERT INTO shop_subscriptions (shop_id, fee_percent, last_paid_at, next_due_at) VALUES (?, ?, ?, ?)",
+            (shop_id, pct, now.isoformat(), next_due)
+        )
+    shop = conn.execute("SELECT name, owner_tg_id FROM shops WHERE id=?", (shop_id,)).fetchone()
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(
+        f"✅ <b>Obuna belgilandi!</b>\n\n"
+        f"🏪 Do'kon: <b>{shop['name'] if shop else shop_id}</b>\n"
+        f"💰 Foiz: <b>{pct}%</b> har 30 kunda\n"
+        f"🗓 Birinchi to'lov: <b>{next_due[:10]}</b>",
+        parse_mode="HTML",
+        reply_markup=back_kb(f"admin_shop_{shop_id}")
+    )
+
+    # Do'kon egasini xabardor qilish
+    if shop:
+        try:
+            await update.get_bot().send_message(
+                shop["owner_tg_id"],
+                f"📢 <b>Obuna tizimi haqida xabar</b>\n\n"
+                f"Do'koningiz <b>{shop['name']}</b> uchun obuna belgilandi:\n"
+                f"💰 Har 30 kunda bot orqali tushgan daromaddan <b>{pct}%</b> olinadi.\n"
+                f"🗓 Birinchi hisob-kitob: <b>{next_due[:10]}</b>",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+
+    return ConversationHandler.END
+
+async def check_subscriptions(context):
+    """Har kuni ishga tushadigan: muddati o'tgan obunalarni tekshiradi"""
+    conn = get_db()
+    now = datetime.now()
+    subs = conn.execute(
+        "SELECT ss.*, s.name as shop_name, s.owner_tg_id "
+        "FROM shop_subscriptions ss JOIN shops s ON ss.shop_id=s.id "
+        "WHERE ss.status='active' AND ss.next_due_at <= ?",
+        (now.isoformat(),)
+    ).fetchall()
+
+    for sub in subs:
+        shop_id = sub["shop_id"]
+        pct = sub["fee_percent"]
+
+        # Oxirgi 30 kundagi yetkazilgan buyurtmalar summasi
+        last_check = sub["last_paid_at"] or (now - timedelta(days=30)).isoformat()
+        orders = conn.execute(
+            "SELECT SUM(total) as s FROM orders WHERE shop_id=? AND status='delivered' AND updated_at >= ?",
+            (shop_id, last_check)
+        ).fetchone()
+        total_sales = orders["s"] or 0
+        fee_amount = total_sales * pct / 100
+
+        next_due = (now + timedelta(days=30)).isoformat()
+        conn.execute(
+            "UPDATE shop_subscriptions SET last_paid_at=?, next_due_at=?, total_earned=total_earned+? WHERE shop_id=?",
+            (now.isoformat(), next_due, fee_amount, shop_id)
+        )
+        conn.commit()
+
+        # Adminga xabar
+        try:
+            await context.bot.send_message(
+                ADMIN_ID,
+                f"💰 <b>Obuna hisob-kitob</b>\n\n"
+                f"🏪 Do'kon: <b>{sub['shop_name']}</b>\n"
+                f"📊 30 kunlik savdo: <b>{format_price(total_sales)}</b>\n"
+                f"💵 Olingan foiz ({pct}%): <b>{format_price(fee_amount)}</b>\n"
+                f"🗓 Keyingi hisob: <b>{next_due[:10]}</b>",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+
+        # Do'kon egasiga xabar
+        try:
+            await context.bot.send_message(
+                sub["owner_tg_id"],
+                f"📅 <b>Oylik obuna hisob-kitob</b>\n\n"
+                f"🏪 Do'kon: <b>{sub['shop_name']}</b>\n"
+                f"📊 Oylik savdo: <b>{format_price(total_sales)}</b>\n"
+                f"💵 Platform ulushi ({pct}%): <b>{format_price(fee_amount)}</b>\n"
+                f"🗓 Keyingi hisob: <b>{next_due[:10]}</b>",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+
+    conn.close()
 
 # ─── ADMIN TO'LOV TIZIMI TAHRIRLASH ────────────────────────────────────────────
 async def admin_set_payment_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2691,6 +2885,8 @@ async def admin_got_card_holder(update: Update, context: ContextTypes.DEFAULT_TY
         reply_markup=back_kb(f"admin_shop_{shop_id}")
     )
     return ConversationHandler.END
+
+async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
@@ -3418,6 +3614,14 @@ def main():
     ]:
         app.add_handler(conv)
 
+    sub_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_sub_settings, pattern=r"^admin_sub_\d+$")],
+        states={WAITING_SUB_PERCENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_sub_percent)]},
+        fallbacks=[],
+        per_message=False,
+    )
+    app.add_handler(sub_conv)
+
     app.add_handler(CommandHandler("start", start))
 
     # Callback handlers
@@ -3484,6 +3688,10 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_courier_fire, pattern=r"^admin_courier_fire_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_shop_delete, pattern=r"^admin_shop_delete_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_set_payment_start, pattern=r"^admin_set_payment_\d+$"))
+    app.add_handler(CallbackQueryHandler(admin_sub_settings, pattern=r"^admin_sub_\d+$"))
+
+    # Har kuni obuna tekshiruvi (soat 09:00 da)
+    app.job_queue.run_daily(check_subscriptions, time=dtime(9, 0))
 
     logger.info("🚀 OsonSavdo Bot ishga tushdi!")
     app.run_polling(drop_pending_updates=True)
