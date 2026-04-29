@@ -3427,7 +3427,19 @@ def main():
     init_db()
     migrate_db()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    async def on_startup(application):
+        async def subscription_loop():
+            while True:
+                await asyncio.sleep(86400)
+                try:
+                    class FakeContext:
+                        bot = application.bot
+                    await check_subscriptions(FakeContext())
+                except Exception as e:
+                    logger.error(f"Obuna tekshiruvida xato: {e}")
+        asyncio.create_task(subscription_loop())
+
+    app = Application.builder().token(BOT_TOKEN).post_init(on_startup).build()
 
     # Conversation handlers
     checkout_conv = ConversationHandler(
@@ -3689,19 +3701,6 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_shop_delete, pattern=r"^admin_shop_delete_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_set_payment_start, pattern=r"^admin_set_payment_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_sub_settings, pattern=r"^admin_sub_\d+$"))
-
-    # Har kuni obuna tekshiruvi (asyncio task sifatida)
-    async def subscription_scheduler():
-        while True:
-            await asyncio.sleep(86400)  # 24 soat
-            try:
-                class FakeContext:
-                    bot = app.bot
-                await check_subscriptions(FakeContext())
-            except Exception as e:
-                logger.error(f"Obuna tekshiruvida xato: {e}")
-
-    app.post_init = lambda application: asyncio.get_event_loop().create_task(subscription_scheduler())
 
     logger.info("🚀 OsonSavdo Bot ishga tushdi!")
     app.run_polling(drop_pending_updates=True)
