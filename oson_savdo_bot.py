@@ -1,0 +1,2847 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+OsonSavdo - Advanced Marketplace Telegram Bot
+Uzum + Glovo + CRM + Support + Delivery System
+"""
+
+import asyncio
+import json
+import os
+import io
+import logging
+import sqlite3
+import random
+import string
+from datetime import datetime, timedelta
+from collections import deque
+from typing import Optional
+
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    InputFile, ReplyKeyboardRemove
+)
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, filters, ContextTypes, ConversationHandler
+)
+
+try:
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    EXCEL_AVAILABLE = True
+except ImportError:
+    EXCEL_AVAILABLE = False
+
+# ─── CONFIG ────────────────────────────────────────────────────────────────────
+BOT_TOKEN = "8609713083:AAFoh_EZqps4cSIs7sdTqdoWpFBox_Z-C80"
+ADMIN_ID = 7948989650
+DB_PATH = "oson_savdo.db"
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# ─── CONVERSATION STATES ───────────────────────────────────────────────────────
+(
+    WAITING_ADDRESS, WAITING_PAYMENT_SCREENSHOT, WAITING_PROMO,
+    WAITING_SHOP_NAME, WAITING_SHOP_DESC, WAITING_PRODUCT_NAME,
+    WAITING_PRODUCT_DESC, WAITING_PRODUCT_PRICE, WAITING_PRODUCT_PHOTO,
+    WAITING_PRODUCT_CATEGORY, WAITING_TICKET_MSG, WAITING_TICKET_REPLY,
+    WAITING_REVIEW, WAITING_COURIER_NAME, WAITING_OPERATOR_ORDER,
+    WAITING_PROMO_CODE_CREATE, WAITING_PRODUCT_STOCK, WAITING_DELIVERY_PRICE,
+    WAITING_WORK_HOURS, WAITING_DISCOUNT_PERCENT, WAITING_COMMISSION,
+    WAITING_BROADCAST, WAITING_PRODUCT_EDIT_PRICE, WAITING_REFERRAL,
+    WAITING_SHOP_EDIT, WAITING_PRODUCT_DISCOUNT,
+) = range(26)
+
+# ─── DATABASE ──────────────────────────────────────────────────────────────────
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db()
+    c = conn.cursor()
+
+    c.executescript("""
+    CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY,
+        tg_id INTEGER UNIQUE,
+        username TEXT,
+        full_name TEXT,
+        role TEXT DEFAULT 'customer',
+        referral_code TEXT UNIQUE,
+        referred_by INTEGER,
+        total_orders INTEGER DEFAULT 0,
+        total_spent REAL DEFAULT 0,
+        rating REAL DEFAULT 0,
+        bonus_balance REAL DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS shops (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_tg_id INTEGER,
+        name TEXT,
+        description TEXT,
+        category TEXT DEFAULT 'Umumiy',
+        status TEXT DEFAULT 'pending',
+        delivery_price REAL DEFAULT 0,
+        work_hours TEXT DEFAULT '09:00-22:00',
+        rating REAL DEFAULT 0,
+        total_reviews INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS products (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        shop_id INTEGER,
+        name TEXT,
+        description TEXT,
+        price REAL,
+        discount_percent REAL DEFAULT 0,
+        photo_id TEXT,
+        category TEXT DEFAULT 'Umumiy',
+        stock INTEGER DEFAULT 999,
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_tg_id INTEGER,
+        shop_id INTEGER,
+        items TEXT,
+        address TEXT,
+        payment_method TEXT,
+        payment_status TEXT DEFAULT 'pending',
+        payment_screenshot TEXT,
+        promo_code TEXT,
+        discount_amount REAL DEFAULT 0,
+        subtotal REAL DEFAULT 0,
+        delivery_price REAL DEFAULT 0,
+        total REAL DEFAULT 0,
+        commission REAL DEFAULT 0,
+        courier_tg_id INTEGER,
+        courier_type TEXT DEFAULT 'standard',
+        premium_fee REAL DEFAULT 0,
+        status TEXT DEFAULT 'new',
+        operator_note TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS couriers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tg_id INTEGER UNIQUE,
+        name TEXT,
+        is_premium INTEGER DEFAULT 0,
+        is_busy INTEGER DEFAULT 0,
+        is_active INTEGER DEFAULT 1,
+        total_deliveries INTEGER DEFAULT 0,
+        rating REAL DEFAULT 0,
+        last_assigned TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS courier_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id INTEGER,
+        added_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS promo_codes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT UNIQUE,
+        discount_type TEXT,
+        discount_value REAL,
+        max_uses INTEGER DEFAULT 100,
+        used_count INTEGER DEFAULT 0,
+        expires_at TEXT,
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS favorites (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_tg_id INTEGER,
+        shop_id INTEGER,
+        UNIQUE(user_tg_id, shop_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_tg_id INTEGER,
+        shop_id INTEGER,
+        order_id INTEGER,
+        rating INTEGER,
+        comment TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS tickets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_tg_id INTEGER,
+        subject TEXT,
+        status TEXT DEFAULT 'open',
+        created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS ticket_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticket_id INTEGER,
+        sender_tg_id INTEGER,
+        message TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS operator_orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        operator_tg_id INTEGER,
+        user_tg_id INTEGER,
+        raw_request TEXT,
+        converted_order TEXT,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_tg_id INTEGER,
+        message TEXT,
+        is_read INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now'))
+    );
+    """)
+
+    # Default settings
+    defaults = [
+        ("commission_percent", "10"),
+        ("premium_courier_fee", "15000"),
+        ("referral_bonus", "5000"),
+        ("platform_name", "OsonSavdo"),
+    ]
+    for key, val in defaults:
+        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, val))
+
+    conn.commit()
+    conn.close()
+
+def get_setting(key: str, default: str = "") -> str:
+    conn = get_db()
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    conn.close()
+    return row["value"] if row else default
+
+def set_setting(key: str, value: str):
+    conn = get_db()
+    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+    conn.commit()
+    conn.close()
+
+# ─── HELPERS ───────────────────────────────────────────────────────────────────
+def gen_referral_code(tg_id: int) -> str:
+    return f"REF{tg_id}"
+
+def get_or_create_user(tg_id: int, username: str = "", full_name: str = "") -> dict:
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+    if not user:
+        ref_code = gen_referral_code(tg_id)
+        conn.execute(
+            "INSERT INTO users (tg_id, username, full_name, referral_code) VALUES (?, ?, ?, ?)",
+            (tg_id, username, full_name, ref_code)
+        )
+        conn.commit()
+        user = conn.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+    conn.close()
+    return dict(user)
+
+def get_user_role(tg_id: int) -> str:
+    if tg_id == ADMIN_ID:
+        return "admin"
+    conn = get_db()
+    row = conn.execute("SELECT role FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+    conn.close()
+    if row:
+        return row["role"]
+    return "customer"
+
+def format_price(amount: float) -> str:
+    return f"{amount:,.0f} so'm"
+
+def order_status_emoji(status: str) -> str:
+    emojis = {
+        "new": "🆕", "confirmed": "✅", "rejected": "❌",
+        "courier_assigned": "🚴", "delivering": "📦",
+        "delivered": "🏁", "cancelled": "🚫"
+    }
+    return emojis.get(status, "❓")
+
+def order_status_text(status: str) -> str:
+    texts = {
+        "new": "Yangi", "confirmed": "Tasdiqlangan", "rejected": "Rad etilgan",
+        "courier_assigned": "Kuryer tayinlandi", "delivering": "Yetkazilmoqda",
+        "delivered": "Yetkazildi", "cancelled": "Bekor qilindi"
+    }
+    return texts.get(status, status)
+
+# ─── INLINE KEYBOARDS ──────────────────────────────────────────────────────────
+def main_menu_kb(role: str) -> InlineKeyboardMarkup:
+    buttons = []
+    if role in ("customer", "admin", "operator"):
+        buttons += [
+            [InlineKeyboardButton("🏪 Do'konlar", callback_data="shops_list"),
+             InlineKeyboardButton("🛒 Savat", callback_data="cart_view")],
+            [InlineKeyboardButton("📦 Buyurtmalarim", callback_data="my_orders"),
+             InlineKeyboardButton("👤 Profil", callback_data="profile")],
+            [InlineKeyboardButton("❤️ Sevimlilar", callback_data="favorites"),
+             InlineKeyboardButton("🎫 Promo kod", callback_data="promo_enter")],
+            [InlineKeyboardButton("🎟 Ticket ochish", callback_data="ticket_open"),
+             InlineKeyboardButton("🔗 Referal", callback_data="referral")],
+        ]
+    if role == "shop_owner":
+        buttons += [
+            [InlineKeyboardButton("🏪 Do'konim", callback_data="my_shop"),
+             InlineKeyboardButton("📦 Buyurtmalar", callback_data="shop_orders")],
+            [InlineKeyboardButton("📊 Hisobot", callback_data="shop_report"),
+             InlineKeyboardButton("➕ Mahsulot", callback_data="add_product")],
+        ]
+    if role == "courier":
+        buttons += [
+            [InlineKeyboardButton("🚴 Mening buyurtmalarim", callback_data="courier_orders"),
+             InlineKeyboardButton("📊 Statistika", callback_data="courier_stats")],
+        ]
+    if role == "admin":
+        buttons += [
+            [InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin_panel")],
+        ]
+    if role == "operator":
+        buttons += [
+            [InlineKeyboardButton("🎙 Operator Panel", callback_data="operator_panel")],
+        ]
+    return InlineKeyboardMarkup(buttons)
+
+def back_kb(callback: str = "main_menu") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Orqaga", callback_data=callback)]])
+
+# ─── /START ────────────────────────────────────────────────────────────────────
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
+    username = update.effective_user.username or ""
+    full_name = update.effective_user.full_name or ""
+
+    # Referral handling
+    args = context.args
+    if args and args[0].startswith("REF"):
+        ref_code = args[0]
+        conn = get_db()
+        referrer = conn.execute("SELECT * FROM users WHERE referral_code=?", (ref_code,)).fetchone()
+        conn.close()
+        if referrer and referrer["tg_id"] != tg_id:
+            context.user_data["referred_by"] = referrer["tg_id"]
+
+    user = get_or_create_user(tg_id, username, full_name)
+
+    if "referred_by" in context.user_data:
+        ref_by = context.user_data.pop("referred_by")
+        conn = get_db()
+        existing = conn.execute("SELECT referred_by FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+        if existing and not existing["referred_by"]:
+            bonus = float(get_setting("referral_bonus", "5000"))
+            conn.execute("UPDATE users SET referred_by=? WHERE tg_id=?", (ref_by, tg_id))
+            conn.execute("UPDATE users SET bonus_balance=bonus_balance+? WHERE tg_id=?", (bonus, ref_by))
+            conn.commit()
+            try:
+                await context.bot.send_message(ref_by, f"🎉 Referal bonus! +{format_price(bonus)} hisob balansiga qo'shildi!")
+            except:
+                pass
+        conn.close()
+
+    role = get_user_role(tg_id)
+    platform = get_setting("platform_name", "OsonSavdo")
+
+    role_labels = {
+        "customer": "Mijoz", "shop_owner": "Do'kon egasi",
+        "courier": "Kuryer", "admin": "Admin", "operator": "Operator"
+    }
+
+    text = (
+        f"👋 Xush kelibsiz, <b>{full_name}</b>!\n"
+        f"🛍 <b>{platform}</b> — Online Marketplace\n\n"
+        f"👤 Rolingiz: <b>{role_labels.get(role, role)}</b>\n"
+        f"─────────────────────"
+    )
+
+    kb = main_menu_kb(role)
+    if update.message:
+        await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await update.callback_query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+
+# ─── SHOPS LIST ────────────────────────────────────────────────────────────────
+async def shops_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    conn = get_db()
+    shops = conn.execute(
+        "SELECT * FROM shops WHERE status='approved' ORDER BY rating DESC"
+    ).fetchall()
+    conn.close()
+
+    if not shops:
+        await q.edit_message_text(
+            "🏪 Hozircha do'konlar yo'q.\nKo'proq vaqt o'tgach qaytib keling!",
+            reply_markup=back_kb()
+        )
+        return
+
+    buttons = []
+    for s in shops:
+        stars = "⭐" * int(s["rating"]) if s["rating"] else "⭐"
+        buttons.append([InlineKeyboardButton(
+            f"🏪 {s['name']} {stars} | 🚚 {format_price(s['delivery_price'])}",
+            callback_data=f"shop_{s['id']}"
+        )])
+
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")])
+    await q.edit_message_text(
+        "🏪 <b>Do'konlar ro'yxati</b>\n\nBiror do'konni tanlang:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML"
+    )
+
+async def shop_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    shop_id = int(q.data.split("_")[1])
+
+    conn = get_db()
+    shop = conn.execute("SELECT * FROM shops WHERE id=?", (shop_id,)).fetchone()
+    conn.close()
+
+    if not shop:
+        await q.edit_message_text("Do'kon topilmadi.", reply_markup=back_kb("shops_list"))
+        return
+
+    context.user_data["current_shop"] = shop_id
+    tg_id = update.effective_user.id
+
+    # Check if favorite
+    conn = get_db()
+    fav = conn.execute(
+        "SELECT id FROM favorites WHERE user_tg_id=? AND shop_id=?", (tg_id, shop_id)
+    ).fetchone()
+    conn.close()
+
+    fav_btn = "💔 Sevimlilardan chiqar" if fav else "❤️ Sevimlilarga qo'sh"
+    fav_cb = f"unfav_{shop_id}" if fav else f"fav_{shop_id}"
+
+    rating_str = f"⭐ {shop['rating']:.1f}" if shop['rating'] else "⭐ Reyting yo'q"
+    text = (
+        f"🏪 <b>{shop['name']}</b>\n"
+        f"📝 {shop['description']}\n"
+        f"📂 Kategoriya: {shop['category']}\n"
+        f"⏰ Ish vaqti: {shop['work_hours']}\n"
+        f"🚚 Yetkazish: {format_price(shop['delivery_price'])}\n"
+        f"{rating_str} ({shop['total_reviews']} sharh)\n"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📦 Mahsulotlar", callback_data=f"products_{shop_id}")],
+        [InlineKeyboardButton(fav_btn, callback_data=fav_cb)],
+        [InlineKeyboardButton("⭐ Reyting qo'y", callback_data=f"rate_shop_{shop_id}"),
+         InlineKeyboardButton("🛒 Savat", callback_data="cart_view")],
+        [InlineKeyboardButton("⬅️ Orqaga", callback_data="shops_list")],
+    ])
+    await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+
+# ─── PRODUCTS ──────────────────────────────────────────────────────────────────
+async def products_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    shop_id = int(q.data.split("_")[1])
+
+    conn = get_db()
+    products = conn.execute(
+        "SELECT * FROM products WHERE shop_id=? AND is_active=1", (shop_id,)
+    ).fetchall()
+    conn.close()
+
+    if not products:
+        await q.edit_message_text(
+            "📦 Bu do'konda mahsulotlar yo'q.",
+            reply_markup=back_kb(f"shop_{shop_id}")
+        )
+        return
+
+    buttons = []
+    for p in products:
+        price = p["price"] * (1 - p["discount_percent"] / 100) if p["discount_percent"] else p["price"]
+        disc = f" 🔥-{int(p['discount_percent'])}%" if p["discount_percent"] else ""
+        buttons.append([InlineKeyboardButton(
+            f"🛍 {p['name']}{disc} | {format_price(price)}",
+            callback_data=f"product_{p['id']}"
+        )])
+
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data=f"shop_{shop_id}")])
+    await q.edit_message_text(
+        f"📦 <b>Mahsulotlar ro'yxati</b>",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML"
+    )
+
+async def product_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    product_id = int(q.data.split("_")[1])
+
+    conn = get_db()
+    p = conn.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
+    conn.close()
+
+    if not p:
+        await q.answer("Mahsulot topilmadi", show_alert=True)
+        return
+
+    price = p["price"]
+    disc_text = ""
+    if p["discount_percent"]:
+        discounted = price * (1 - p["discount_percent"] / 100)
+        disc_text = f"\n🔥 Aksiya: <s>{format_price(price)}</s> → <b>{format_price(discounted)}</b> (-{int(p['discount_percent'])}%)"
+        price = discounted
+
+    text = (
+        f"🛍 <b>{p['name']}</b>\n"
+        f"📝 {p['description']}\n"
+        f"💰 Narx: <b>{format_price(price)}</b>{disc_text}\n"
+        f"📦 Omborda: {p['stock']} ta\n"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛒 Savatga qo'sh", callback_data=f"add_cart_{product_id}")],
+        [InlineKeyboardButton("⬅️ Orqaga", callback_data=f"products_{p['shop_id']}")],
+    ])
+
+    if p["photo_id"]:
+        try:
+            await context.bot.send_photo(
+                q.from_user.id, p["photo_id"], caption=text,
+                reply_markup=kb, parse_mode="HTML"
+            )
+            await q.message.delete()
+        except:
+            await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+
+# ─── CART ──────────────────────────────────────────────────────────────────────
+def get_cart(context) -> dict:
+    return context.user_data.get("cart", {})
+
+def save_cart(context, cart: dict):
+    context.user_data["cart"] = cart
+
+async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer("✅ Savatga qo'shildi!")
+    product_id = int(q.data.split("_")[2])
+
+    conn = get_db()
+    p = conn.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
+    conn.close()
+
+    if not p:
+        return
+
+    cart = get_cart(context)
+    pid = str(product_id)
+    if pid in cart:
+        cart[pid]["qty"] += 1
+    else:
+        price = p["price"] * (1 - p["discount_percent"] / 100) if p["discount_percent"] else p["price"]
+        cart[pid] = {
+            "name": p["name"], "price": price,
+            "qty": 1, "shop_id": p["shop_id"]
+        }
+    save_cart(context, cart)
+
+async def cart_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    cart = get_cart(context)
+
+    if not cart:
+        await q.edit_message_text(
+            "🛒 Savat bo'sh!\n\nDo'konlardan mahsulot qo'shing.",
+            reply_markup=back_kb("shops_list")
+        )
+        return
+
+    total = sum(v["price"] * v["qty"] for v in cart.values())
+    text = "🛒 <b>Savatingiz:</b>\n\n"
+    buttons = []
+
+    for pid, item in cart.items():
+        text += f"• {item['name']} x{item['qty']} = {format_price(item['price'] * item['qty'])}\n"
+        buttons.append([
+            InlineKeyboardButton(f"➖", callback_data=f"cart_dec_{pid}"),
+            InlineKeyboardButton(f"{item['name'][:15]} x{item['qty']}", callback_data="noop"),
+            InlineKeyboardButton(f"➕", callback_data=f"cart_inc_{pid}"),
+            InlineKeyboardButton(f"🗑", callback_data=f"cart_del_{pid}"),
+        ])
+
+    # Check promo
+    promo_discount = context.user_data.get("promo_discount", 0)
+    promo_code = context.user_data.get("promo_code", "")
+    if promo_discount:
+        text += f"\n🏷 Promo: -{format_price(promo_discount)}"
+        total -= promo_discount
+
+    text += f"\n\n💰 <b>Jami: {format_price(total)}</b>"
+
+    buttons += [
+        [InlineKeyboardButton("🎫 Promo kod", callback_data="promo_enter"),
+         InlineKeyboardButton("🗑 Tozalash", callback_data="cart_clear")],
+        [InlineKeyboardButton("✅ Buyurtma berish", callback_data="checkout")],
+        [InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")],
+    ]
+
+    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
+
+async def cart_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    parts = q.data.split("_")
+    action = parts[1]
+    pid = parts[2]
+
+    cart = get_cart(context)
+    if pid not in cart:
+        await q.answer()
+        return
+
+    if action == "inc":
+        cart[pid]["qty"] += 1
+    elif action == "dec":
+        cart[pid]["qty"] -= 1
+        if cart[pid]["qty"] <= 0:
+            del cart[pid]
+    elif action == "del":
+        del cart[pid]
+
+    save_cart(context, cart)
+    await q.answer("✅")
+    await cart_view(update, context)
+
+async def cart_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    context.user_data["cart"] = {}
+    context.user_data.pop("promo_discount", None)
+    context.user_data.pop("promo_code", None)
+    await q.edit_message_text("🗑 Savat tozalandi.", reply_markup=back_kb("shops_list"))
+
+# ─── PROMO CODE ────────────────────────────────────────────────────────────────
+async def promo_enter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    context.user_data["state"] = WAITING_PROMO
+    await q.edit_message_text(
+        "🎫 Promo kodni kiriting:",
+        reply_markup=back_kb("cart_view")
+    )
+    return WAITING_PROMO
+
+async def promo_apply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    code = update.message.text.strip().upper()
+    conn = get_db()
+    promo = conn.execute(
+        "SELECT * FROM promo_codes WHERE code=? AND is_active=1", (code,)
+    ).fetchone()
+    conn.close()
+
+    if not promo:
+        await update.message.reply_text("❌ Promo kod topilmadi yoki faol emas.")
+        return ConversationHandler.END
+
+    now = datetime.now()
+    if promo["expires_at"] and datetime.fromisoformat(promo["expires_at"]) < now:
+        await update.message.reply_text("❌ Promo kod muddati tugagan.")
+        return ConversationHandler.END
+
+    if promo["used_count"] >= promo["max_uses"]:
+        await update.message.reply_text("❌ Promo kod limitiga yetildi.")
+        return ConversationHandler.END
+
+    cart = get_cart(context)
+    subtotal = sum(v["price"] * v["qty"] for v in cart.values())
+
+    if promo["discount_type"] == "percent":
+        discount = subtotal * promo["discount_value"] / 100
+    else:
+        discount = promo["discount_value"]
+
+    context.user_data["promo_discount"] = discount
+    context.user_data["promo_code"] = code
+
+    await update.message.reply_text(
+        f"✅ Promo kod qo'llanildi!\n💰 Chegirma: -{format_price(discount)}",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Savatga", callback_data="cart_view")]])
+    )
+    return ConversationHandler.END
+
+# ─── CHECKOUT ──────────────────────────────────────────────────────────────────
+async def checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    cart = get_cart(context)
+
+    if not cart:
+        await q.edit_message_text("🛒 Savat bo'sh!", reply_markup=back_kb("shops_list"))
+        return
+
+    context.user_data["checkout_step"] = "address"
+    await q.edit_message_text(
+        "📍 <b>Yetkazish manzilini kiriting:</b>\n\n"
+        "Masalan: Toshkent sh., Chilonzor t., 5-uy, 12-xonadon",
+        reply_markup=back_kb("cart_view"),
+        parse_mode="HTML"
+    )
+    return WAITING_ADDRESS
+
+async def got_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    address = update.message.text.strip()
+    context.user_data["order_address"] = address
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 Karta orqali", callback_data="pay_card"),
+         InlineKeyboardButton("💵 Naqd", callback_data="pay_cash")],
+    ])
+    await update.message.reply_text(
+        f"📍 Manzil: <b>{address}</b>\n\n💳 To'lov usulini tanlang:",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    return ConversationHandler.END
+
+async def payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    method = "card" if q.data == "pay_card" else "cash"
+    context.user_data["payment_method"] = method
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚴 Oddiy kuryer (bepul)", callback_data="courier_standard"),
+         InlineKeyboardButton("⚡ Premium kuryer", callback_data="courier_premium")],
+    ])
+
+    premium_fee = get_setting("premium_courier_fee", "15000")
+    await q.edit_message_text(
+        f"✅ To'lov: <b>{'Karta' if method == 'card' else 'Naqd'}</b>\n\n"
+        f"🚴 Kuryer turini tanlang:\n"
+        f"• Oddiy: Bepul\n"
+        f"• Premium: +{format_price(float(premium_fee))} (tezroq yetkazish)",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+async def courier_type_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    ctype = "standard" if q.data == "courier_standard" else "premium"
+    context.user_data["courier_type"] = ctype
+
+    if context.user_data.get("payment_method") == "card":
+        cart = get_cart(context)
+        total = sum(v["price"] * v["qty"] for v in cart.values())
+        promo = context.user_data.get("promo_discount", 0)
+        total -= promo
+
+        # Get shop delivery price
+        shop_id = list(cart.values())[0]["shop_id"] if cart else None
+        if shop_id:
+            conn = get_db()
+            shop = conn.execute("SELECT delivery_price FROM shops WHERE id=?", (shop_id,)).fetchone()
+            conn.close()
+            delivery = shop["delivery_price"] if shop else 0
+        else:
+            delivery = 0
+
+        premium_fee = float(get_setting("premium_courier_fee", "15000")) if ctype == "premium" else 0
+        grand_total = total + delivery + premium_fee
+
+        await q.edit_message_text(
+            f"💳 <b>Karta orqali to'lov</b>\n\n"
+            f"💰 Jami: <b>{format_price(grand_total)}</b>\n\n"
+            f"📸 To'lov chekini (screenshot) yuboring:",
+            parse_mode="HTML"
+        )
+        return WAITING_PAYMENT_SCREENSHOT
+    else:
+        await place_order(update, context, screenshot=None)
+
+async def got_payment_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+    elif update.message.document:
+        file_id = update.message.document.file_id
+    else:
+        await update.message.reply_text("❌ Iltimos, rasm yoki fayl yuboring.")
+        return WAITING_PAYMENT_SCREENSHOT
+
+    await place_order(update, context, screenshot=file_id)
+    return ConversationHandler.END
+
+async def place_order(update, context, screenshot=None):
+    tg_id = update.effective_user.id
+    cart = get_cart(context)
+
+    if not cart:
+        return
+
+    # Get shop info
+    shop_id = list(cart.values())[0]["shop_id"]
+    conn = get_db()
+    shop = conn.execute("SELECT * FROM shops WHERE id=?", (shop_id,)).fetchone()
+    conn.close()
+
+    subtotal = sum(v["price"] * v["qty"] for v in cart.values())
+    promo_discount = context.user_data.get("promo_discount", 0)
+    promo_code = context.user_data.get("promo_code", "")
+    delivery_price = shop["delivery_price"] if shop else 0
+    ctype = context.user_data.get("courier_type", "standard")
+    premium_fee = float(get_setting("premium_courier_fee", "15000")) if ctype == "premium" else 0
+    total = subtotal - promo_discount + delivery_price + premium_fee
+
+    commission_pct = float(get_setting("commission_percent", "10"))
+    commission = total * commission_pct / 100
+
+    items_json = json.dumps(dict(cart), ensure_ascii=False)
+    address = context.user_data.get("order_address", "")
+    payment_method = context.user_data.get("payment_method", "cash")
+    payment_status = "pending" if payment_method == "card" else "cash"
+
+    conn = get_db()
+    cur = conn.execute(
+        """INSERT INTO orders (user_tg_id, shop_id, items, address, payment_method,
+           payment_status, payment_screenshot, promo_code, discount_amount,
+           subtotal, delivery_price, total, commission, courier_type, premium_fee)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (tg_id, shop_id, items_json, address, payment_method,
+         payment_status, screenshot, promo_code, promo_discount,
+         subtotal, delivery_price, total, commission, ctype, premium_fee)
+    )
+    order_id = cur.lastrowid
+
+    # Update promo usage
+    if promo_code:
+        conn.execute("UPDATE promo_codes SET used_count=used_count+1 WHERE code=?", (promo_code,))
+
+    conn.commit()
+    conn.close()
+
+    # Clear cart
+    context.user_data["cart"] = {}
+    context.user_data.pop("promo_discount", None)
+    context.user_data.pop("promo_code", None)
+
+    order_text = (
+        f"🆕 <b>Yangi buyurtma #{1000 + order_id}</b>\n\n"
+        f"👤 Mijoz: {update.effective_user.full_name}\n"
+        f"🏪 Do'kon: {shop['name'] if shop else 'N/A'}\n"
+        f"📍 Manzil: {address}\n"
+        f"💰 Jami: {format_price(total)}\n"
+        f"💳 To'lov: {'Karta' if payment_method == 'card' else 'Naqd'}\n"
+        f"🚴 Kuryer: {'Premium ⚡' if ctype == 'premium' else 'Oddiy'}\n"
+    )
+
+    # Notify admin
+    admin_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"admin_confirm_{order_id}"),
+         InlineKeyboardButton("❌ Rad etish", callback_data=f"admin_reject_{order_id}")],
+    ])
+    try:
+        await context.bot.send_message(ADMIN_ID, order_text, reply_markup=admin_kb, parse_mode="HTML")
+        if screenshot:
+            await context.bot.send_photo(ADMIN_ID, screenshot, caption=f"📸 #{1000 + order_id} to'lov cheki")
+    except:
+        pass
+
+    # Notify shop owner
+    if shop:
+        try:
+            shop_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Qabul", callback_data=f"shop_confirm_{order_id}"),
+                 InlineKeyboardButton("❌ Rad", callback_data=f"shop_reject_{order_id}")],
+            ])
+            await context.bot.send_message(
+                shop["owner_tg_id"], order_text, reply_markup=shop_kb, parse_mode="HTML"
+            )
+        except:
+            pass
+
+    confirm_text = (
+        f"✅ <b>Buyurtmangiz qabul qilindi!</b>\n\n"
+        f"📦 Buyurtma ID: <b>#{1000 + order_id}</b>\n"
+        f"💰 Jami: <b>{format_price(total)}</b>\n"
+        f"⏳ Do'kon egasi tasdiqlashini kuting...\n\n"
+        f"📲 Buyurtma holatini <b>Buyurtmalarim</b> bo'limida kuzating."
+    )
+
+    if update.message:
+        await update.message.reply_text(
+            confirm_text,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📦 Buyurtmalarim", callback_data="my_orders")]]),
+            parse_mode="HTML"
+        )
+    else:
+        await context.bot.send_message(
+            tg_id, confirm_text,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📦 Buyurtmalarim", callback_data="my_orders")]]),
+            parse_mode="HTML"
+        )
+
+# ─── MY ORDERS ─────────────────────────────────────────────────────────────────
+async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    orders = conn.execute(
+        "SELECT o.*, s.name as shop_name FROM orders o LEFT JOIN shops s ON o.shop_id=s.id "
+        "WHERE o.user_tg_id=? ORDER BY o.id DESC LIMIT 10",
+        (tg_id,)
+    ).fetchall()
+    conn.close()
+
+    if not orders:
+        await q.edit_message_text("📦 Buyurtmalar yo'q.", reply_markup=back_kb())
+        return
+
+    buttons = []
+    for o in orders:
+        emoji = order_status_emoji(o["status"])
+        buttons.append([InlineKeyboardButton(
+            f"{emoji} #{1000 + o['id']} — {o['shop_name']} — {format_price(o['total'])}",
+            callback_data=f"order_detail_{o['id']}"
+        )])
+
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")])
+    await q.edit_message_text(
+        "📦 <b>Buyurtmalarim (so'nggi 10)</b>",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML"
+    )
+
+async def order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    order_id = int(q.data.split("_")[2])
+
+    conn = get_db()
+    o = conn.execute(
+        "SELECT o.*, s.name as shop_name FROM orders o LEFT JOIN shops s ON o.shop_id=s.id WHERE o.id=?",
+        (order_id,)
+    ).fetchone()
+    conn.close()
+
+    if not o:
+        await q.answer("Buyurtma topilmadi", show_alert=True)
+        return
+
+    items = json.loads(o["items"])
+    items_text = "\n".join([f"• {v['name']} x{v['qty']}" for v in items.values()])
+    emoji = order_status_emoji(o["status"])
+    status_txt = order_status_text(o["status"])
+
+    text = (
+        f"{emoji} <b>Buyurtma #{1000 + o['id']}</b>\n\n"
+        f"🏪 Do'kon: {o['shop_name']}\n"
+        f"📦 Mahsulotlar:\n{items_text}\n\n"
+        f"📍 Manzil: {o['address']}\n"
+        f"💰 Jami: {format_price(o['total'])}\n"
+        f"💳 To'lov: {'Karta' if o['payment_method'] == 'card' else 'Naqd'}\n"
+        f"📊 Holat: <b>{status_txt}</b>\n"
+    )
+
+    buttons = []
+    if o["status"] == "delivered":
+        buttons.append([InlineKeyboardButton("⭐ Baho berish", callback_data=f"rate_order_{order_id}")])
+        buttons.append([InlineKeyboardButton("🔄 Qayta buyurtma", callback_data=f"reorder_{order_id}")])
+
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="my_orders")])
+    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
+
+# ─── REORDER ───────────────────────────────────────────────────────────────────
+async def reorder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    order_id = int(q.data.split("_")[1])
+
+    conn = get_db()
+    o = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    conn.close()
+
+    if not o:
+        await q.answer("Buyurtma topilmadi", show_alert=True)
+        return
+
+    items = json.loads(o["items"])
+    context.user_data["cart"] = items
+    await q.edit_message_text(
+        "✅ Mahsulotlar savatga qo'shildi!",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Savatga", callback_data="cart_view")]])
+    )
+
+# ─── ADMIN ORDER CONFIRM/REJECT ────────────────────────────────────────────────
+async def admin_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    order_id = int(q.data.split("_")[2])
+
+    conn = get_db()
+    conn.execute(
+        "UPDATE orders SET status='confirmed', updated_at=datetime('now') WHERE id=?",
+        (order_id,)
+    )
+    o = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    conn.commit()
+    conn.close()
+
+    await q.edit_message_text(f"✅ Buyurtma #{1000 + order_id} tasdiqlandi!")
+
+    # Notify customer
+    try:
+        await context.bot.send_message(
+            o["user_tg_id"],
+            f"✅ Buyurtmangiz #{1000 + order_id} tasdiqlandi!\n🚴 Kuryer tayinlanmoqda..."
+        )
+    except:
+        pass
+
+    # Assign courier
+    await assign_courier(context, order_id, o["courier_type"])
+
+async def admin_reject_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    order_id = int(q.data.split("_")[2])
+
+    conn = get_db()
+    o = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    conn.execute(
+        "UPDATE orders SET status='rejected', updated_at=datetime('now') WHERE id=?",
+        (order_id,)
+    )
+    conn.commit()
+    conn.close()
+
+    await q.edit_message_text(f"❌ Buyurtma #{1000 + order_id} rad etildi.")
+
+    try:
+        await context.bot.send_message(
+            o["user_tg_id"],
+            f"❌ Buyurtmangiz #{1000 + order_id} rad etildi.\n📞 Qo'shimcha ma'lumot uchun support bilan bog'laning."
+        )
+    except:
+        pass
+
+async def shop_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer("✅ Tasdiqlandi!")
+    order_id = int(q.data.split("_")[2])
+
+    conn = get_db()
+    o = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    if o and o["status"] == "new":
+        conn.execute("UPDATE orders SET status='confirmed' WHERE id=?", (order_id,))
+        conn.commit()
+    conn.close()
+
+    await q.edit_message_text(f"✅ Buyurtma #{1000 + order_id} qabul qilindi!")
+
+    try:
+        await context.bot.send_message(
+            o["user_tg_id"],
+            f"✅ Do'kon buyurtmangizni #{1000 + order_id} qabul qildi!\n🚴 Kuryer tayinlanmoqda..."
+        )
+    except:
+        pass
+
+    await assign_courier(context, order_id, o["courier_type"] if o else "standard")
+
+async def shop_reject_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer("❌ Rad etildi!")
+    order_id = int(q.data.split("_")[2])
+
+    conn = get_db()
+    o = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    conn.execute("UPDATE orders SET status='rejected' WHERE id=?", (order_id,))
+    conn.commit()
+    conn.close()
+
+    await q.edit_message_text(f"❌ Buyurtma #{1000 + order_id} rad etildi.")
+
+    if o:
+        try:
+            await context.bot.send_message(
+                o["user_tg_id"],
+                f"❌ Buyurtmangiz #{1000 + order_id} rad etildi."
+            )
+        except:
+            pass
+
+# ─── COURIER SYSTEM (ROUND-ROBIN) ─────────────────────────────────────────────
+courier_queue_state = deque()
+
+async def assign_courier(context, order_id: int, courier_type: str = "standard"):
+    conn = get_db()
+    is_premium = 1 if courier_type == "premium" else 0
+
+    couriers = conn.execute(
+        "SELECT * FROM couriers WHERE is_active=1 AND is_busy=0 AND is_premium=? ORDER BY last_assigned ASC NULLS FIRST",
+        (is_premium,)
+    ).fetchall()
+
+    if not couriers and is_premium:
+        couriers = conn.execute(
+            "SELECT * FROM couriers WHERE is_active=1 AND is_busy=0 ORDER BY last_assigned ASC NULLS FIRST"
+        ).fetchall()
+
+    if not couriers:
+        # Add to queue
+        conn.execute("INSERT INTO courier_queue (order_id) VALUES (?)", (order_id,))
+        conn.commit()
+        conn.close()
+        try:
+            o = conn.execute("SELECT user_tg_id FROM orders WHERE id=?", (order_id,)).fetchone()
+            if o:
+                await context.bot.send_message(
+                    o["user_tg_id"],
+                    f"⏳ Buyurtma #{1000 + order_id} kuryer navbatiga qo'shildi. Tez orada tayinlanadi."
+                )
+        except:
+            pass
+        return
+
+    courier = couriers[0]
+    conn.execute(
+        "UPDATE orders SET courier_tg_id=?, status='courier_assigned', updated_at=datetime('now') WHERE id=?",
+        (courier["tg_id"], order_id)
+    )
+    conn.execute(
+        "UPDATE couriers SET is_busy=1, last_assigned=datetime('now') WHERE tg_id=?",
+        (courier["tg_id"],)
+    )
+    conn.commit()
+    conn.close()
+
+    o_conn = get_db()
+    o = o_conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    o_conn.close()
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Qabul qilish", callback_data=f"courier_accept_{order_id}"),
+         InlineKeyboardButton("❌ Rad etish", callback_data=f"courier_reject_{order_id}")],
+    ])
+
+    try:
+        items = json.loads(o["items"]) if o else {}
+        items_txt = ", ".join([f"{v['name']} x{v['qty']}" for v in items.values()])
+        await context.bot.send_message(
+            courier["tg_id"],
+            f"🚴 <b>Yangi buyurtma #{1000 + order_id}</b>\n\n"
+            f"📦 {items_txt}\n"
+            f"📍 Manzil: {o['address']}\n"
+            f"💰 {format_price(o['total'])}\n"
+            f"{'⚡ Premium yetkazish' if courier_type == 'premium' else ''}",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+    except:
+        pass
+
+async def courier_accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    order_id = int(q.data.split("_")[2])
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    o = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    conn.execute("UPDATE orders SET status='delivering' WHERE id=?", (order_id,))
+    conn.commit()
+    conn.close()
+
+    await q.edit_message_text(f"✅ Buyurtma #{1000 + order_id} qabul qilindi!\n🚴 Yetkazishni boshlang.")
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏁 Yetkazildi", callback_data=f"courier_delivered_{order_id}")],
+    ])
+    await context.bot.send_message(tg_id, "Yetkazib bo'lgach tugmani bosing:", reply_markup=kb)
+
+    if o:
+        try:
+            await context.bot.send_message(
+                o["user_tg_id"],
+                f"🚴 Kuryer yetib bormoqda!\n📦 Buyurtma #{1000 + order_id}"
+            )
+        except:
+            pass
+
+async def courier_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    order_id = int(q.data.split("_")[2])
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    conn.execute("UPDATE couriers SET is_busy=0 WHERE tg_id=?", (tg_id,))
+    conn.execute("UPDATE orders SET courier_tg_id=NULL, status='confirmed' WHERE id=?", (order_id,))
+    o = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    conn.commit()
+    conn.close()
+
+    await q.edit_message_text(f"❌ Buyurtma #{1000 + order_id} rad etildi.")
+
+    # Reassign
+    ctype = o["courier_type"] if o else "standard"
+    await assign_courier(context, order_id, ctype)
+
+async def courier_delivered(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    order_id = int(q.data.split("_")[2])
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    o = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    conn.execute(
+        "UPDATE orders SET status='delivered', updated_at=datetime('now') WHERE id=?",
+        (order_id,)
+    )
+    conn.execute("UPDATE couriers SET is_busy=0, total_deliveries=total_deliveries+1 WHERE tg_id=?", (tg_id,))
+    conn.commit()
+    conn.close()
+
+    await q.edit_message_text(f"🏁 Buyurtma #{1000 + order_id} yetkazildi! Rahmat!")
+
+    if o:
+        try:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("⭐ Baho berish", callback_data=f"rate_order_{order_id}")],
+            ])
+            await context.bot.send_message(
+                o["user_tg_id"],
+                f"🎉 Buyurtmangiz #{1000 + order_id} yetkazildi!\n"
+                f"Xizmatimiz sifatini baholang:",
+                reply_markup=kb
+            )
+        except:
+            pass
+
+    # Check queue
+    conn = get_db()
+    queued = conn.execute("SELECT * FROM courier_queue ORDER BY id ASC LIMIT 1").fetchone()
+    if queued:
+        conn.execute("DELETE FROM courier_queue WHERE id=?", (queued["id"],))
+        conn.commit()
+        conn.close()
+        await assign_courier(context, queued["order_id"])
+    else:
+        conn.close()
+
+# ─── PROFILE ───────────────────────────────────────────────────────────────────
+async def profile_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+    conn.close()
+
+    if not user:
+        await q.edit_message_text("Profil topilmadi.", reply_markup=back_kb())
+        return
+
+    ref_link = f"https://t.me/OsonSavdoBot?start={user['referral_code']}"
+    text = (
+        f"👤 <b>Profilim</b>\n\n"
+        f"👤 Ism: {user['full_name']}\n"
+        f"📦 Buyurtmalar: {user['total_orders']}\n"
+        f"💰 Jami sarf: {format_price(user['total_spent'])}\n"
+        f"⭐ Reyting: {user['rating']:.1f}\n"
+        f"💎 Bonus balans: {format_price(user['bonus_balance'])}\n"
+        f"🔗 Referal: <code>{ref_link}</code>\n"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")],
+    ])
+    await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+
+# ─── FAVORITES ─────────────────────────────────────────────────────────────────
+async def favorites_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    favs = conn.execute(
+        "SELECT s.* FROM favorites f JOIN shops s ON f.shop_id=s.id WHERE f.user_tg_id=?",
+        (tg_id,)
+    ).fetchall()
+    conn.close()
+
+    if not favs:
+        await q.edit_message_text("❤️ Sevimli do'konlar yo'q.", reply_markup=back_kb())
+        return
+
+    buttons = [[InlineKeyboardButton(f"🏪 {s['name']}", callback_data=f"shop_{s['id']}")] for s in favs]
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")])
+    await q.edit_message_text("❤️ <b>Sevimli do'konlar</b>", reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
+
+async def add_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer("❤️ Sevimlilarga qo'shildi!")
+    shop_id = int(q.data.split("_")[1])
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    try:
+        conn.execute("INSERT OR IGNORE INTO favorites (user_tg_id, shop_id) VALUES (?, ?)", (tg_id, shop_id))
+        conn.commit()
+    except:
+        pass
+    conn.close()
+    await shop_detail(update, context)
+
+async def remove_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer("💔 Sevimlilardan chiqarildi!")
+    shop_id = int(q.data.split("_")[1])
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    conn.execute("DELETE FROM favorites WHERE user_tg_id=? AND shop_id=?", (tg_id, shop_id))
+    conn.commit()
+    conn.close()
+    await shop_detail(update, context)
+
+# ─── RATING ────────────────────────────────────────────────────────────────────
+async def rate_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    order_id = int(q.data.split("_")[2])
+    context.user_data["rating_order_id"] = order_id
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("⭐", callback_data=f"give_rating_{order_id}_1"),
+        InlineKeyboardButton("⭐⭐", callback_data=f"give_rating_{order_id}_2"),
+        InlineKeyboardButton("⭐⭐⭐", callback_data=f"give_rating_{order_id}_3"),
+        InlineKeyboardButton("⭐⭐⭐⭐", callback_data=f"give_rating_{order_id}_4"),
+        InlineKeyboardButton("⭐⭐⭐⭐⭐", callback_data=f"give_rating_{order_id}_5"),
+    ]])
+    await q.edit_message_text("⭐ Xizmatni baholang:", reply_markup=kb)
+
+async def give_rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    parts = q.data.split("_")
+    order_id = int(parts[2])
+    rating = int(parts[3])
+
+    context.user_data["pending_rating"] = {"order_id": order_id, "rating": rating}
+    await q.edit_message_text(
+        f"{'⭐' * rating} Baho: {rating}/5\n\n📝 Izoh yozing (yoki /skip):"
+    )
+    return WAITING_REVIEW
+
+async def got_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    comment = update.message.text.strip()
+    if comment == "/skip":
+        comment = ""
+
+    pending = context.user_data.pop("pending_rating", None)
+    if not pending:
+        return ConversationHandler.END
+
+    order_id = pending["order_id"]
+    rating = pending["rating"]
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    o = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    if o:
+        # Check duplicate
+        existing = conn.execute(
+            "SELECT id FROM reviews WHERE user_tg_id=? AND order_id=?", (tg_id, order_id)
+        ).fetchone()
+
+        if not existing:
+            conn.execute(
+                "INSERT INTO reviews (user_tg_id, shop_id, order_id, rating, comment) VALUES (?, ?, ?, ?, ?)",
+                (tg_id, o["shop_id"], order_id, rating, comment)
+            )
+            # Update shop rating
+            avg = conn.execute(
+                "SELECT AVG(rating) as avg, COUNT(*) as cnt FROM reviews WHERE shop_id=?",
+                (o["shop_id"],)
+            ).fetchone()
+            conn.execute(
+                "UPDATE shops SET rating=?, total_reviews=? WHERE id=?",
+                (avg["avg"], avg["cnt"], o["shop_id"])
+            )
+            conn.commit()
+
+    conn.close()
+    await update.message.reply_text(
+        f"⭐ Rahmat! {'⭐' * rating} bahongiz saqlandi.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Bosh sahifa", callback_data="main_menu")]])
+    )
+    return ConversationHandler.END
+
+# ─── RATE SHOP (from shop detail) ─────────────────────────────────────────────
+async def rate_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    shop_id = int(q.data.split("_")[2])
+    context.user_data["rating_shop_id"] = shop_id
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"{i}⭐", callback_data=f"shop_rating_{shop_id}_{i}")
+        for i in range(1, 6)
+    ]])
+    await q.edit_message_text("⭐ Do'konni baholang:", reply_markup=kb)
+
+async def give_shop_rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer("⭐ Bahoingiz saqlandi!")
+    parts = q.data.split("_")
+    shop_id = int(parts[2])
+    rating = int(parts[3])
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO reviews (user_tg_id, shop_id, order_id, rating, comment) VALUES (?, ?, NULL, ?, '')",
+        (tg_id, shop_id, rating)
+    )
+    avg = conn.execute(
+        "SELECT AVG(rating) as avg, COUNT(*) as cnt FROM reviews WHERE shop_id=?", (shop_id,)
+    ).fetchone()
+    conn.execute("UPDATE shops SET rating=?, total_reviews=? WHERE id=?", (avg["avg"], avg["cnt"], shop_id))
+    conn.commit()
+    conn.close()
+
+    await q.edit_message_text(
+        f"{'⭐' * rating} Rahmat! Bahoyingiz saqlandi.",
+        reply_markup=back_kb(f"shop_{shop_id}")
+    )
+
+# ─── TICKETS ───────────────────────────────────────────────────────────────────
+async def ticket_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        "🎟 <b>Ticket (muammo) ochish</b>\n\n"
+        "Muammoni qisqacha yozing:",
+        reply_markup=back_kb(),
+        parse_mode="HTML"
+    )
+    return WAITING_TICKET_MSG
+
+async def got_ticket_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message.text.strip()
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO tickets (user_tg_id, subject) VALUES (?, ?)", (tg_id, msg[:100])
+    )
+    ticket_id = cur.lastrowid
+    conn.execute(
+        "INSERT INTO ticket_messages (ticket_id, sender_tg_id, message) VALUES (?, ?, ?)",
+        (ticket_id, tg_id, msg)
+    )
+    conn.commit()
+    conn.close()
+
+    # Notify admin
+    try:
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📩 Javob berish", callback_data=f"ticket_reply_{ticket_id}")
+        ]])
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"🎟 <b>Yangi Ticket #SUP-{1000 + ticket_id}</b>\n"
+            f"👤 Foydalanuvchi: {update.effective_user.full_name}\n"
+            f"📝 {msg}",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+    except:
+        pass
+
+    await update.message.reply_text(
+        f"✅ Ticketingiz qabul qilindi!\n🎟 Ticket ID: <b>#SUP-{1000 + ticket_id}</b>\n\nAdmin tez orada javob beradi.",
+        parse_mode="HTML",
+        reply_markup=back_kb()
+    )
+    return ConversationHandler.END
+
+async def ticket_reply_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    ticket_id = int(q.data.split("_")[2])
+    context.user_data["replying_ticket"] = ticket_id
+
+    await q.edit_message_text(
+        f"📩 #SUP-{1000 + ticket_id} uchun javob yozing:"
+    )
+    return WAITING_TICKET_REPLY
+
+async def got_ticket_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message.text.strip()
+    tg_id = update.effective_user.id
+    ticket_id = context.user_data.pop("replying_ticket", None)
+
+    if not ticket_id:
+        return ConversationHandler.END
+
+    conn = get_db()
+    ticket = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+    conn.execute(
+        "INSERT INTO ticket_messages (ticket_id, sender_tg_id, message) VALUES (?, ?, ?)",
+        (ticket_id, tg_id, msg)
+    )
+    conn.commit()
+    conn.close()
+
+    if ticket:
+        try:
+            await context.bot.send_message(
+                ticket["user_tg_id"],
+                f"📩 <b>#SUP-{1000 + ticket_id}</b> Ticket javob:\n\n{msg}",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+
+    await update.message.reply_text("✅ Javob yuborildi!")
+    return ConversationHandler.END
+
+# ─── REFERRAL ──────────────────────────────────────────────────────────────────
+async def referral_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    user = conn.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+    referred = conn.execute("SELECT COUNT(*) as cnt FROM users WHERE referred_by=?", (tg_id,)).fetchone()
+    conn.close()
+
+    bonus = get_setting("referral_bonus", "5000")
+    ref_link = f"https://t.me/OsonSavdoBot?start={user['referral_code']}"
+
+    text = (
+        f"🔗 <b>Referal tizimi</b>\n\n"
+        f"Har bir do'st uchun: +{format_price(float(bonus))}\n"
+        f"Taklif qilinganlar: {referred['cnt']} kishi\n\n"
+        f"Sizning havolangiz:\n<code>{ref_link}</code>\n\n"
+        f"Havolani do'stlarga yuboring va bonus yig'ing! 💰"
+    )
+
+    await q.edit_message_text(text, reply_markup=back_kb(), parse_mode="HTML")
+
+# ─── SHOP OWNER PANEL ──────────────────────────────────────────────────────────
+async def my_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    shop = conn.execute("SELECT * FROM shops WHERE owner_tg_id=?", (tg_id,)).fetchone()
+    conn.close()
+
+    if not shop:
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Do'kon qo'shish", callback_data="add_shop")],
+            [InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")],
+        ])
+        await q.edit_message_text(
+            "🏪 Sizda do'kon yo'q.\nYangi do'kon qo'shing:",
+            reply_markup=kb
+        )
+        return
+
+    status_txt = {"approved": "✅ Faol", "pending": "⏳ Kutilmoqda", "rejected": "❌ Rad etildi"}.get(shop["status"], shop["status"])
+    text = (
+        f"🏪 <b>{shop['name']}</b>\n\n"
+        f"📝 {shop['description']}\n"
+        f"📊 Holat: {status_txt}\n"
+        f"⭐ Reyting: {shop['rating']:.1f} ({shop['total_reviews']} sharh)\n"
+        f"🚚 Yetkazish: {format_price(shop['delivery_price'])}\n"
+        f"⏰ Ish vaqti: {shop['work_hours']}\n"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📦 Mahsulotlar", callback_data=f"owner_products_{shop['id']}"),
+         InlineKeyboardButton("➕ Mahsulot qo'sh", callback_data="add_product")],
+        [InlineKeyboardButton("⚙️ Sozlamalar", callback_data=f"shop_settings_{shop['id']}"),
+         InlineKeyboardButton("📊 Hisobot", callback_data="shop_report")],
+        [InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")],
+    ])
+    await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+
+async def shop_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    shop_id = int(q.data.split("_")[2])
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💰 Yetkazish narxi", callback_data=f"set_delivery_{shop_id}"),
+         InlineKeyboardButton("⏰ Ish vaqti", callback_data=f"set_hours_{shop_id}")],
+        [InlineKeyboardButton("⬅️ Orqaga", callback_data="my_shop")],
+    ])
+    await q.edit_message_text("⚙️ Do'kon sozlamalari:", reply_markup=kb)
+
+async def set_delivery_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    shop_id = int(q.data.split("_")[2])
+    context.user_data["setting_shop_id"] = shop_id
+    await q.edit_message_text("💰 Yangi yetkazish narxini kiriting (so'mda):")
+    return WAITING_DELIVERY_PRICE
+
+async def got_delivery_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        price = float(update.message.text.strip().replace(" ", ""))
+    except:
+        await update.message.reply_text("❌ Noto'g'ri format. Raqam kiriting.")
+        return WAITING_DELIVERY_PRICE
+
+    shop_id = context.user_data.pop("setting_shop_id", None)
+    if shop_id:
+        conn = get_db()
+        conn.execute("UPDATE shops SET delivery_price=? WHERE id=?", (price, shop_id))
+        conn.commit()
+        conn.close()
+
+    await update.message.reply_text(
+        f"✅ Yetkazish narxi {format_price(price)} ga o'zgartirildi!",
+        reply_markup=back_kb("my_shop")
+    )
+    return ConversationHandler.END
+
+async def set_work_hours(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    shop_id = int(q.data.split("_")[2])
+    context.user_data["setting_shop_id"] = shop_id
+    await q.edit_message_text("⏰ Ish vaqtini kiriting (masalan: 09:00-22:00):")
+    return WAITING_WORK_HOURS
+
+async def got_work_hours(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    hours = update.message.text.strip()
+    shop_id = context.user_data.pop("setting_shop_id", None)
+    if shop_id:
+        conn = get_db()
+        conn.execute("UPDATE shops SET work_hours=? WHERE id=?", (hours, shop_id))
+        conn.commit()
+        conn.close()
+
+    await update.message.reply_text(f"✅ Ish vaqti {hours} ga o'zgartirildi!", reply_markup=back_kb("my_shop"))
+    return ConversationHandler.END
+
+# ─── ADD SHOP ──────────────────────────────────────────────────────────────────
+async def add_shop_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    context.user_data["adding_shop"] = True
+    await q.edit_message_text("🏪 Do'kon nomini kiriting:")
+    return WAITING_SHOP_NAME
+
+async def got_shop_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["shop_name"] = update.message.text.strip()
+    await update.message.reply_text("📝 Do'kon tavsifini kiriting:")
+    return WAITING_SHOP_DESC
+
+async def got_shop_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = context.user_data.pop("shop_name", "")
+    desc = update.message.text.strip()
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO shops (owner_tg_id, name, description) VALUES (?, ?, ?)",
+        (tg_id, name, desc)
+    )
+    shop_id = cur.lastrowid
+
+    # Set user as shop_owner
+    conn.execute("UPDATE users SET role='shop_owner' WHERE tg_id=?", (tg_id,))
+    conn.commit()
+    conn.close()
+
+    # Notify admin
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"admin_shop_approve_{shop_id}"),
+         InlineKeyboardButton("❌ Rad etish", callback_data=f"admin_shop_reject_{shop_id}")],
+    ])
+    try:
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"🏪 <b>Yangi do'kon so'rovi</b>\n\n"
+            f"Nomi: {name}\nTavsif: {desc}\n"
+            f"Egasi ID: {tg_id}",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+    except:
+        pass
+
+    await update.message.reply_text(
+        "✅ Do'kon qo'shish so'rovi yuborildi!\nAdmin tasdiqlashini kuting.",
+        reply_markup=back_kb()
+    )
+    return ConversationHandler.END
+
+# ─── ADD PRODUCT ───────────────────────────────────────────────────────────────
+async def add_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    shop = conn.execute("SELECT id FROM shops WHERE owner_tg_id=? AND status='approved'", (tg_id,)).fetchone()
+    conn.close()
+
+    if not shop:
+        await q.edit_message_text("❌ Tasdiqlangan do'koningiz yo'q.", reply_markup=back_kb())
+        return ConversationHandler.END
+
+    context.user_data["adding_product_shop"] = shop["id"]
+    await q.edit_message_text("🛍 Mahsulot nomini kiriting:")
+    return WAITING_PRODUCT_NAME
+
+async def got_product_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["prod_name"] = update.message.text.strip()
+    await update.message.reply_text("📝 Mahsulot tavsifini kiriting:")
+    return WAITING_PRODUCT_DESC
+
+async def got_product_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["prod_desc"] = update.message.text.strip()
+    await update.message.reply_text("💰 Narxini kiriting (so'mda):")
+    return WAITING_PRODUCT_PRICE
+
+async def got_product_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        price = float(update.message.text.strip().replace(" ", "").replace(",", ""))
+        context.user_data["prod_price"] = price
+        await update.message.reply_text("📸 Rasmini yuboring (yoki /skip):")
+        return WAITING_PRODUCT_PHOTO
+    except:
+        await update.message.reply_text("❌ Noto'g'ri format. Faqat raqam kiriting:")
+        return WAITING_PRODUCT_PRICE
+
+async def got_product_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text and update.message.text == "/skip":
+        photo_id = None
+    elif update.message.photo:
+        photo_id = update.message.photo[-1].file_id
+    else:
+        photo_id = None
+
+    shop_id = context.user_data.pop("adding_product_shop", None)
+    name = context.user_data.pop("prod_name", "")
+    desc = context.user_data.pop("prod_desc", "")
+    price = context.user_data.pop("prod_price", 0)
+
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO products (shop_id, name, description, price, photo_id) VALUES (?, ?, ?, ?, ?)",
+        (shop_id, name, desc, price, photo_id)
+    )
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(
+        f"✅ <b>{name}</b> mahsuloti qo'shildi!\n💰 Narx: {format_price(price)}",
+        reply_markup=back_kb("my_shop"),
+        parse_mode="HTML"
+    )
+    return ConversationHandler.END
+
+# ─── OWNER PRODUCTS ────────────────────────────────────────────────────────────
+async def owner_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    shop_id = int(q.data.split("_")[2])
+
+    conn = get_db()
+    products = conn.execute("SELECT * FROM products WHERE shop_id=?", (shop_id,)).fetchall()
+    conn.close()
+
+    if not products:
+        await q.edit_message_text("📦 Mahsulotlar yo'q.", reply_markup=back_kb("my_shop"))
+        return
+
+    buttons = []
+    for p in products:
+        status = "✅" if p["is_active"] else "❌"
+        buttons.append([InlineKeyboardButton(
+            f"{status} {p['name']} — {format_price(p['price'])}",
+            callback_data=f"owner_prod_{p['id']}"
+        )])
+
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="my_shop")])
+    await q.edit_message_text(
+        "📦 <b>Mahsulotlaringiz:</b>",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML"
+    )
+
+async def owner_product_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    prod_id = int(q.data.split("_")[2])
+
+    conn = get_db()
+    p = conn.execute("SELECT * FROM products WHERE id=?", (prod_id,)).fetchone()
+    conn.close()
+
+    if not p:
+        await q.answer("Topilmadi", show_alert=True)
+        return
+
+    toggle_label = "❌ O'chirish" if p["is_active"] else "✅ Yoqish"
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Narx o'zgartiris", callback_data=f"edit_price_{prod_id}"),
+         InlineKeyboardButton("🔥 Aksiya", callback_data=f"set_discount_{prod_id}")],
+        [InlineKeyboardButton(toggle_label, callback_data=f"toggle_prod_{prod_id}")],
+        [InlineKeyboardButton("⬅️ Orqaga", callback_data=f"owner_products_{p['shop_id']}")],
+    ])
+
+    disc_txt = f"\n🔥 Aksiya: {p['discount_percent']}%" if p["discount_percent"] else ""
+    await q.edit_message_text(
+        f"🛍 <b>{p['name']}</b>\n"
+        f"💰 {format_price(p['price'])}{disc_txt}\n"
+        f"📦 Ombor: {p['stock']}\n"
+        f"{'✅ Faol' if p['is_active'] else '❌ Nofaol'}",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+async def edit_product_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    prod_id = int(q.data.split("_")[2])
+    context.user_data["editing_prod_id"] = prod_id
+    await q.edit_message_text("💰 Yangi narxni kiriting (so'mda):")
+    return WAITING_PRODUCT_EDIT_PRICE
+
+async def got_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        price = float(update.message.text.strip().replace(" ", ""))
+    except:
+        await update.message.reply_text("❌ Noto'g'ri format.")
+        return WAITING_PRODUCT_EDIT_PRICE
+
+    prod_id = context.user_data.pop("editing_prod_id", None)
+    if prod_id:
+        conn = get_db()
+        conn.execute("UPDATE products SET price=? WHERE id=?", (price, prod_id))
+        conn.commit()
+        conn.close()
+
+    await update.message.reply_text(f"✅ Narx {format_price(price)} ga o'zgartirildi!", reply_markup=back_kb("my_shop"))
+    return ConversationHandler.END
+
+async def set_product_discount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    prod_id = int(q.data.split("_")[2])
+    context.user_data["discounting_prod_id"] = prod_id
+    await q.edit_message_text("🔥 Chegirma foizini kiriting (0-100):")
+    return WAITING_PRODUCT_DISCOUNT
+
+async def got_product_discount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        pct = float(update.message.text.strip())
+        if not 0 <= pct <= 100:
+            raise ValueError
+    except:
+        await update.message.reply_text("❌ 0 dan 100 gacha raqam kiriting.")
+        return WAITING_PRODUCT_DISCOUNT
+
+    prod_id = context.user_data.pop("discounting_prod_id", None)
+    if prod_id:
+        conn = get_db()
+        conn.execute("UPDATE products SET discount_percent=? WHERE id=?", (pct, prod_id))
+        conn.commit()
+        conn.close()
+
+    await update.message.reply_text(f"✅ Aksiya {int(pct)}% o'rnatildi!", reply_markup=back_kb("my_shop"))
+    return ConversationHandler.END
+
+async def toggle_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    prod_id = int(q.data.split("_")[2])
+
+    conn = get_db()
+    p = conn.execute("SELECT is_active, shop_id FROM products WHERE id=?", (prod_id,)).fetchone()
+    if p:
+        new_status = 0 if p["is_active"] else 1
+        conn.execute("UPDATE products SET is_active=? WHERE id=?", (new_status, prod_id))
+        conn.commit()
+    conn.close()
+
+    await q.answer("✅ O'zgartirildi!")
+    await owner_product_detail(update, context)
+
+# ─── SHOP ORDERS ───────────────────────────────────────────────────────────────
+async def shop_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    shop = conn.execute("SELECT id FROM shops WHERE owner_tg_id=?", (tg_id,)).fetchone()
+    if not shop:
+        await q.edit_message_text("Do'kon topilmadi.", reply_markup=back_kb())
+        conn.close()
+        return
+
+    orders = conn.execute(
+        "SELECT * FROM orders WHERE shop_id=? ORDER BY id DESC LIMIT 20",
+        (shop["id"],)
+    ).fetchall()
+    conn.close()
+
+    if not orders:
+        await q.edit_message_text("📦 Buyurtmalar yo'q.", reply_markup=back_kb())
+        return
+
+    buttons = []
+    for o in orders:
+        emoji = order_status_emoji(o["status"])
+        buttons.append([InlineKeyboardButton(
+            f"{emoji} #{1000 + o['id']} — {format_price(o['total'])} — {order_status_text(o['status'])}",
+            callback_data=f"shop_order_detail_{o['id']}"
+        )])
+
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="my_shop")])
+    await q.edit_message_text(
+        "📦 <b>Do'kon buyurtmalari</b>",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML"
+    )
+
+# ─── SHOP REPORT ───────────────────────────────────────────────────────────────
+async def shop_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    shop = conn.execute("SELECT * FROM shops WHERE owner_tg_id=?", (tg_id,)).fetchone()
+    if not shop:
+        await q.edit_message_text("Do'kon topilmadi.", reply_markup=back_kb())
+        conn.close()
+        return
+
+    thirty_days_ago = (datetime.now() - timedelta(days=30)).isoformat()
+    orders = conn.execute(
+        "SELECT * FROM orders WHERE shop_id=? AND created_at>? AND status='delivered'",
+        (shop["id"], thirty_days_ago)
+    ).fetchall()
+    conn.close()
+
+    total_revenue = sum(o["total"] - o["commission"] for o in orders)
+    total_orders = len(orders)
+
+    if not EXCEL_AVAILABLE:
+        await q.edit_message_text(
+            f"📊 <b>30 kunlik hisobot</b>\n\n"
+            f"📦 Buyurtmalar: {total_orders}\n"
+            f"💰 Daromad: {format_price(total_revenue)}\n\n"
+            f"Excel uchun openpyxl o'rnating.",
+            reply_markup=back_kb("my_shop"),
+            parse_mode="HTML"
+        )
+        return
+
+    # Create Excel
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Hisobot"
+
+    header_font = Font(bold=True)
+    header_fill = PatternFill("solid", fgColor="4CAF50")
+
+    headers = ["#", "Buyurtma ID", "Sana", "Jami", "Komissiya", "Daromad", "Holat"]
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+
+    for row, o in enumerate(orders, 2):
+        revenue = o["total"] - o["commission"]
+        ws.append([
+            row - 1,
+            f"#{1000 + o['id']}",
+            o["created_at"][:10],
+            o["total"],
+            o["commission"],
+            revenue,
+            order_status_text(o["status"])
+        ])
+
+    # Summary
+    ws.append([])
+    ws.append(["", "", "JAMI:", total_revenue + sum(o["commission"] for o in orders),
+               sum(o["commission"] for o in orders), total_revenue, ""])
+
+    excel_buf = io.BytesIO()
+    wb.save(excel_buf)
+    excel_buf.seek(0)
+
+    await context.bot.send_document(
+        tg_id,
+        document=InputFile(excel_buf, filename=f"hisobot_{shop['name']}_{datetime.now().strftime('%Y%m%d')}.xlsx"),
+        caption=f"📊 <b>30 kunlik hisobot</b>\n📦 Buyurtmalar: {total_orders}\n💰 Daromad: {format_price(total_revenue)}",
+        parse_mode="HTML"
+    )
+
+# ─── ADMIN PANEL ───────────────────────────────────────────────────────────────
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    if update.effective_user.id != ADMIN_ID:
+        await q.answer("❌ Ruxsat yo'q!", show_alert=True)
+        return
+
+    conn = get_db()
+    total_users = conn.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
+    total_orders = conn.execute("SELECT COUNT(*) as c FROM orders").fetchone()["c"]
+    total_shops = conn.execute("SELECT COUNT(*) as c FROM shops WHERE status='approved'").fetchone()["c"]
+    total_revenue = conn.execute("SELECT SUM(commission) as s FROM orders WHERE status='delivered'").fetchone()["s"] or 0
+    pending_shops = conn.execute("SELECT COUNT(*) as c FROM shops WHERE status='pending'").fetchone()["c"]
+    open_tickets = conn.execute("SELECT COUNT(*) as c FROM tickets WHERE status='open'").fetchone()["c"]
+    conn.close()
+
+    commission = get_setting("commission_percent", "10")
+
+    text = (
+        f"⚙️ <b>Admin Panel</b>\n\n"
+        f"👥 Foydalanuvchilar: {total_users}\n"
+        f"📦 Buyurtmalar: {total_orders}\n"
+        f"🏪 Do'konlar: {total_shops}\n"
+        f"💰 Platforma daromadi: {format_price(total_revenue)}\n"
+        f"📊 Komissiya: {commission}%\n"
+        f"⏳ Kutayotgan do'konlar: {pending_shops}\n"
+        f"🎟 Ochiq ticketlar: {open_tickets}\n"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏪 Do'konlar", callback_data="admin_shops"),
+         InlineKeyboardButton("👥 Foydalanuvchilar", callback_data="admin_users")],
+        [InlineKeyboardButton("📦 Buyurtmalar", callback_data="admin_orders"),
+         InlineKeyboardButton("🚴 Kuryerlar", callback_data="admin_couriers")],
+        [InlineKeyboardButton("🎫 Promo kodlar", callback_data="admin_promos"),
+         InlineKeyboardButton("🎟 Ticketlar", callback_data="admin_tickets")],
+        [InlineKeyboardButton("📊 Excel hisobot", callback_data="admin_excel"),
+         InlineKeyboardButton("💰 Komissiya", callback_data="admin_commission")],
+        [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"),
+         InlineKeyboardButton("⚙️ Sozlamalar", callback_data="admin_settings")],
+        [InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")],
+    ])
+    await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+
+async def admin_shops(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    conn = get_db()
+    shops = conn.execute("SELECT * FROM shops ORDER BY id DESC").fetchall()
+    conn.close()
+
+    buttons = []
+    for s in shops:
+        status = {"approved": "✅", "pending": "⏳", "rejected": "❌"}.get(s["status"], "?")
+        buttons.append([InlineKeyboardButton(
+            f"{status} {s['name']}", callback_data=f"admin_shop_{s['id']}"
+        )])
+
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")])
+    await q.edit_message_text(
+        "🏪 <b>Barcha do'konlar:</b>",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML"
+    )
+
+async def admin_shop_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    shop_id = int(q.data.split("_")[2])
+
+    conn = get_db()
+    s = conn.execute("SELECT * FROM shops WHERE id=?", (shop_id,)).fetchone()
+    conn.close()
+
+    if not s:
+        await q.answer("Topilmadi", show_alert=True)
+        return
+
+    buttons = []
+    if s["status"] == "pending":
+        buttons.append([
+            InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"admin_shop_approve_{shop_id}"),
+            InlineKeyboardButton("❌ Rad etish", callback_data=f"admin_shop_reject_{shop_id}"),
+        ])
+    elif s["status"] == "approved":
+        buttons.append([InlineKeyboardButton("🚫 Bloklash", callback_data=f"admin_shop_reject_{shop_id}")])
+
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_shops")])
+    await q.edit_message_text(
+        f"🏪 <b>{s['name']}</b>\n"
+        f"📝 {s['description']}\n"
+        f"Egasi ID: {s['owner_tg_id']}\n"
+        f"Holat: {s['status']}\n"
+        f"⭐ {s['rating']:.1f} ({s['total_reviews']} sharh)",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML"
+    )
+
+async def admin_shop_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    shop_id = int(q.data.split("_")[3])
+
+    conn = get_db()
+    s = conn.execute("SELECT * FROM shops WHERE id=?", (shop_id,)).fetchone()
+    conn.execute("UPDATE shops SET status='approved' WHERE id=?", (shop_id,))
+    conn.commit()
+    conn.close()
+
+    await q.edit_message_text(f"✅ Do'kon #{shop_id} tasdiqlandi!")
+    if s:
+        try:
+            await context.bot.send_message(s["owner_tg_id"], f"🎉 Do'koningiz '{s['name']}' tasdiqlandi! /start bosing.")
+        except:
+            pass
+
+async def admin_shop_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    shop_id = int(q.data.split("_")[3])
+
+    conn = get_db()
+    s = conn.execute("SELECT * FROM shops WHERE id=?", (shop_id,)).fetchone()
+    conn.execute("UPDATE shops SET status='rejected' WHERE id=?", (shop_id,))
+    conn.commit()
+    conn.close()
+
+    await q.edit_message_text(f"❌ Do'kon #{shop_id} rad etildi.")
+    if s:
+        try:
+            await context.bot.send_message(s["owner_tg_id"], f"❌ Do'koningiz '{s['name']}' rad etildi.")
+        except:
+            pass
+
+async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    conn = get_db()
+    users = conn.execute("SELECT * FROM users ORDER BY id DESC LIMIT 20").fetchall()
+    conn.close()
+
+    text = "👥 <b>Foydalanuvchilar (so'nggi 20):</b>\n\n"
+    for u in users:
+        role = u["role"] or "customer"
+        text += f"• {u['full_name']} [{role}] — {u['total_orders']} buyurtma\n"
+
+    await q.edit_message_text(text, reply_markup=back_kb("admin_panel"), parse_mode="HTML")
+
+async def admin_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    conn = get_db()
+    orders = conn.execute(
+        "SELECT o.*, s.name as shop_name FROM orders o LEFT JOIN shops s ON o.shop_id=s.id ORDER BY o.id DESC LIMIT 15"
+    ).fetchall()
+    conn.close()
+
+    buttons = []
+    for o in orders:
+        emoji = order_status_emoji(o["status"])
+        buttons.append([InlineKeyboardButton(
+            f"{emoji} #{1000 + o['id']} | {o['shop_name']} | {format_price(o['total'])}",
+            callback_data=f"admin_order_{o['id']}"
+        )])
+
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")])
+    await q.edit_message_text(
+        "📦 <b>Barcha buyurtmalar:</b>",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML"
+    )
+
+async def admin_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    order_id = int(q.data.split("_")[2])
+
+    conn = get_db()
+    o = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+    conn.close()
+
+    if not o:
+        await q.answer("Topilmadi", show_alert=True)
+        return
+
+    items = json.loads(o["items"])
+    items_txt = "\n".join([f"• {v['name']} x{v['qty']}" for v in items.values()])
+
+    text = (
+        f"📦 <b>Buyurtma #{1000 + order_id}</b>\n\n"
+        f"{items_txt}\n\n"
+        f"📍 Manzil: {o['address']}\n"
+        f"💰 Jami: {format_price(o['total'])}\n"
+        f"📊 Komissiya: {format_price(o['commission'])}\n"
+        f"💳 To'lov: {'Karta' if o['payment_method'] == 'card' else 'Naqd'}\n"
+        f"🚴 Kuryer: {o['courier_type']}\n"
+        f"📊 Holat: {order_status_text(o['status'])}\n"
+    )
+
+    buttons = []
+    if o["status"] == "new":
+        buttons.append([
+            InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"admin_confirm_{order_id}"),
+            InlineKeyboardButton("❌ Rad etish", callback_data=f"admin_reject_{order_id}"),
+        ])
+
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_orders")])
+    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
+
+# ─── ADMIN COURIERS ────────────────────────────────────────────────────────────
+async def admin_couriers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    conn = get_db()
+    couriers = conn.execute("SELECT * FROM couriers ORDER BY id DESC").fetchall()
+    conn.close()
+
+    text = "🚴 <b>Kuryerlar:</b>\n\n"
+    if not couriers:
+        text += "Kuryerlar yo'q.\n"
+    for c in couriers:
+        busy = "🔴 Band" if c["is_busy"] else "🟢 Bo'sh"
+        prem = "⚡" if c["is_premium"] else ""
+        text += f"{prem} {c['name']} | {busy} | {c['total_deliveries']} yetkazish\n"
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Kuryer qo'shish", callback_data="add_courier")],
+        [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")],
+    ])
+    await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+
+async def add_courier_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        "🚴 Kuryer ma'lumotlarini kiriting:\n\nFormat: TelegramID|Ism|premium(1/0)\nMasalan: 123456|Ali|0"
+    )
+    return WAITING_COURIER_NAME
+
+async def got_courier_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        parts = update.message.text.strip().split("|")
+        tg_id = int(parts[0])
+        name = parts[1]
+        is_premium = int(parts[2]) if len(parts) > 2 else 0
+    except:
+        await update.message.reply_text("❌ Format: TelegramID|Ism|premium(1/0)")
+        return WAITING_COURIER_NAME
+
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO couriers (tg_id, name, is_premium) VALUES (?, ?, ?)",
+            (tg_id, name, is_premium)
+        )
+        conn.execute("INSERT OR IGNORE INTO users (tg_id, full_name, role) VALUES (?, ?, 'courier')", (tg_id, name))
+        conn.execute("UPDATE users SET role='courier' WHERE tg_id=?", (tg_id,))
+        conn.commit()
+        await update.message.reply_text(f"✅ Kuryer {name} qo'shildi!")
+        try:
+            await context.bot.send_message(tg_id, f"🚴 Siz OsonSavdo kuryeri sifatida qo'shildingiz!\n/start bosing.")
+        except:
+            pass
+    except Exception as e:
+        await update.message.reply_text(f"❌ Xatolik: {e}")
+    finally:
+        conn.close()
+
+    return ConversationHandler.END
+
+# ─── COURIER STATS ─────────────────────────────────────────────────────────────
+async def courier_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    orders = conn.execute(
+        "SELECT o.*, s.name as shop_name FROM orders o LEFT JOIN shops s ON o.shop_id=s.id "
+        "WHERE o.courier_tg_id=? ORDER BY o.id DESC LIMIT 10",
+        (tg_id,)
+    ).fetchall()
+    conn.close()
+
+    if not orders:
+        await q.edit_message_text("📦 Buyurtmalar yo'q.", reply_markup=back_kb())
+        return
+
+    buttons = []
+    for o in orders:
+        emoji = order_status_emoji(o["status"])
+        buttons.append([InlineKeyboardButton(
+            f"{emoji} #{1000 + o['id']} — {o['shop_name']}",
+            callback_data=f"courier_order_{o['id']}"
+        )])
+
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")])
+    await q.edit_message_text(
+        "🚴 <b>Mening yetkazishlarim:</b>",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML"
+    )
+
+async def courier_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    courier = conn.execute("SELECT * FROM couriers WHERE tg_id=?", (tg_id,)).fetchone()
+    conn.close()
+
+    if not courier:
+        await q.edit_message_text("Kuryer topilmadi.", reply_markup=back_kb())
+        return
+
+    text = (
+        f"📊 <b>Kuryer statistikasi</b>\n\n"
+        f"👤 Ism: {courier['name']}\n"
+        f"📦 Jami yetkazishlar: {courier['total_deliveries']}\n"
+        f"⭐ Reyting: {courier['rating']:.1f}\n"
+        f"{'⚡ Premium kuryer' if courier['is_premium'] else '🚴 Oddiy kuryer'}\n"
+        f"{'🔴 Band' if courier['is_busy'] else '🟢 Bo\'sh'}\n"
+    )
+
+    await q.edit_message_text(text, reply_markup=back_kb(), parse_mode="HTML")
+
+# ─── PROMO CODES (ADMIN) ───────────────────────────────────────────────────────
+async def admin_promos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    conn = get_db()
+    promos = conn.execute("SELECT * FROM promo_codes ORDER BY id DESC").fetchall()
+    conn.close()
+
+    text = "🎫 <b>Promo kodlar:</b>\n\n"
+    for p in promos:
+        status = "✅" if p["is_active"] else "❌"
+        disc = f"{p['discount_value']}%" if p["discount_type"] == "percent" else format_price(p["discount_value"])
+        text += f"{status} <code>{p['code']}</code> — {disc} | {p['used_count']}/{p['max_uses']}\n"
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Yangi promo", callback_data="create_promo")],
+        [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")],
+    ])
+    await q.edit_message_text(text or "Promo kodlar yo'q.", reply_markup=kb, parse_mode="HTML")
+
+async def create_promo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        "🎫 Promo kod ma'lumotlarini kiriting:\n\n"
+        "Format: KOD|tur(percent/fixed)|qiymat|limit|kun\n"
+        "Masalan: SUMMER25|percent|25|100|30"
+    )
+    return WAITING_PROMO_CODE_CREATE
+
+async def got_promo_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        parts = update.message.text.strip().split("|")
+        code = parts[0].upper()
+        dtype = parts[1]
+        value = float(parts[2])
+        limit = int(parts[3])
+        days = int(parts[4])
+        expires = (datetime.now() + timedelta(days=days)).isoformat()
+    except:
+        await update.message.reply_text("❌ Format: KOD|tur|qiymat|limit|kun")
+        return WAITING_PROMO_CODE_CREATE
+
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO promo_codes (code, discount_type, discount_value, max_uses, expires_at) VALUES (?, ?, ?, ?, ?)",
+            (code, dtype, value, limit, expires)
+        )
+        conn.commit()
+        await update.message.reply_text(
+            f"✅ Promo kod yaratildi!\n🎫 Kod: <code>{code}</code>\n"
+            f"💰 Chegirma: {value}{'%' if dtype == 'percent' else ' so\'m'}\n"
+            f"📅 {days} kun amal qiladi",
+            parse_mode="HTML",
+            reply_markup=back_kb("admin_promos")
+        )
+    except:
+        await update.message.reply_text("❌ Bu kod allaqachon mavjud.")
+    finally:
+        conn.close()
+
+    return ConversationHandler.END
+
+# ─── ADMIN COMMISSION ──────────────────────────────────────────────────────────
+async def admin_commission(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    current = get_setting("commission_percent", "10")
+    await q.edit_message_text(
+        f"💰 Joriy komissiya: <b>{current}%</b>\n\nYangi foizni kiriting (0-50):",
+        reply_markup=back_kb("admin_panel"),
+        parse_mode="HTML"
+    )
+    return WAITING_COMMISSION
+
+async def got_commission(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        pct = float(update.message.text.strip())
+        if not 0 <= pct <= 50:
+            raise ValueError
+    except:
+        await update.message.reply_text("❌ 0 dan 50 gacha raqam kiriting.")
+        return WAITING_COMMISSION
+
+    set_setting("commission_percent", str(pct))
+    await update.message.reply_text(
+        f"✅ Komissiya {pct}% ga o'zgartirildi!",
+        reply_markup=back_kb("admin_panel")
+    )
+    return ConversationHandler.END
+
+# ─── ADMIN TICKETS ─────────────────────────────────────────────────────────────
+async def admin_tickets(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    conn = get_db()
+    tickets = conn.execute("SELECT * FROM tickets ORDER BY id DESC LIMIT 20").fetchall()
+    conn.close()
+
+    if not tickets:
+        await q.edit_message_text("🎟 Ticketlar yo'q.", reply_markup=back_kb("admin_panel"))
+        return
+
+    buttons = []
+    for t in tickets:
+        status = "🟢" if t["status"] == "open" else "🔴"
+        buttons.append([InlineKeyboardButton(
+            f"{status} #SUP-{1000 + t['id']} — {t['subject'][:30]}",
+            callback_data=f"ticket_reply_{t['id']}"
+        )])
+
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")])
+    await q.edit_message_text(
+        "🎟 <b>Ticketlar:</b>",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML"
+    )
+
+# ─── ADMIN EXCEL REPORT ────────────────────────────────────────────────────────
+async def admin_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tg_id = update.effective_user.id
+
+    if not EXCEL_AVAILABLE:
+        await q.edit_message_text("❌ openpyxl o'rnatilmagan.", reply_markup=back_kb("admin_panel"))
+        return
+
+    conn = get_db()
+    orders = conn.execute(
+        "SELECT o.*, s.name as shop_name FROM orders o LEFT JOIN shops s ON o.shop_id=s.id ORDER BY o.id DESC"
+    ).fetchall()
+    conn.close()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Buyurtmalar"
+
+    headers = ["Buyurtma ID", "Do'kon", "Manzil", "Jami", "Komissiya", "Holat", "Sana"]
+    for col, h in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=h).font = Font(bold=True)
+
+    for row, o in enumerate(orders, 2):
+        ws.append([
+            f"#{1000 + o['id']}",
+            o["shop_name"],
+            o["address"],
+            o["total"],
+            o["commission"],
+            order_status_text(o["status"]),
+            o["created_at"][:10]
+        ])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    await context.bot.send_document(
+        tg_id,
+        document=InputFile(buf, filename=f"admin_hisobot_{datetime.now().strftime('%Y%m%d')}.xlsx"),
+        caption="📊 Admin hisobot"
+    )
+
+# ─── BROADCAST ─────────────────────────────────────────────────────────────────
+async def admin_broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text("📢 Xabarni kiriting (barcha foydalanuvchilarga yuboriladi):")
+    return WAITING_BROADCAST
+
+async def got_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message.text.strip()
+    conn = get_db()
+    users = conn.execute("SELECT tg_id FROM users").fetchall()
+    conn.close()
+
+    sent = 0
+    for u in users:
+        try:
+            await context.bot.send_message(u["tg_id"], f"📢 <b>OsonSavdo xabari:</b>\n\n{msg}", parse_mode="HTML")
+            sent += 1
+        except:
+            pass
+
+    await update.message.reply_text(f"✅ Xabar {sent}/{len(users)} foydalanuvchiga yuborildi!")
+    return ConversationHandler.END
+
+# ─── ADMIN SETTINGS ────────────────────────────────────────────────────────────
+async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    commission = get_setting("commission_percent", "10")
+    premium_fee = get_setting("premium_courier_fee", "15000")
+    ref_bonus = get_setting("referral_bonus", "5000")
+
+    text = (
+        f"⚙️ <b>Platform sozlamalari</b>\n\n"
+        f"💰 Komissiya: {commission}%\n"
+        f"⚡ Premium kuryer to'lovi: {format_price(float(premium_fee))}\n"
+        f"🔗 Referal bonus: {format_price(float(ref_bonus))}\n"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💰 Komissiya o'zgartiris", callback_data="admin_commission")],
+        [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")],
+    ])
+    await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+
+# ─── OPERATOR PANEL ────────────────────────────────────────────────────────────
+async def operator_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 Buyurtma kiritish", callback_data="operator_new_order")],
+        [InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")],
+    ])
+    await q.edit_message_text("🎙 <b>Operator Panel</b>", reply_markup=kb, parse_mode="HTML")
+
+async def operator_new_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        "📝 Buyurtmani matn shaklida kiriting:\n\nFormat: FoydalanuvchiID|Mahsulotlar|Manzil"
+    )
+    return WAITING_OPERATOR_ORDER
+
+async def got_operator_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO operator_orders (operator_tg_id, raw_request) VALUES (?, ?)",
+        (tg_id, text)
+    )
+    conn.commit()
+    conn.close()
+
+    try:
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"🎙 <b>Operator buyurtmasi</b>\n\n{text}\n\nOperator: {update.effective_user.full_name}",
+            parse_mode="HTML"
+        )
+    except:
+        pass
+
+    await update.message.reply_text("✅ Buyurtma adminiga yuborildi!", reply_markup=back_kb())
+    return ConversationHandler.END
+
+# ─── NOOP ──────────────────────────────────────────────────────────────────────
+async def noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+
+# ─── MAIN MENU CALLBACK ────────────────────────────────────────────────────────
+async def main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tg_id = update.effective_user.id
+    role = get_user_role(tg_id)
+    platform = get_setting("platform_name", "OsonSavdo")
+    full_name = update.effective_user.full_name or ""
+
+    text = (
+        f"🛍 <b>{platform}</b>\n"
+        f"Xush kelibsiz, <b>{full_name}</b>!\n"
+        f"─────────────────────"
+    )
+    await q.edit_message_text(text, reply_markup=main_menu_kb(role), parse_mode="HTML")
+
+# ─── APPLICATION ───────────────────────────────────────────────────────────────
+def main():
+    init_db()
+
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    # Conversation handlers
+    checkout_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(checkout, pattern="^checkout$")],
+        states={WAITING_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_address)]},
+        fallbacks=[],
+        per_message=False,
+    )
+
+    payment_screenshot_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(courier_type_select, pattern="^courier_(standard|premium)$")],
+        states={WAITING_PAYMENT_SCREENSHOT: [MessageHandler(filters.PHOTO | filters.Document.ALL, got_payment_screenshot)]},
+        fallbacks=[],
+        per_message=False,
+    )
+
+    promo_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(promo_enter, pattern="^promo_enter$")],
+        states={WAITING_PROMO: [MessageHandler(filters.TEXT & ~filters.COMMAND, promo_apply)]},
+        fallbacks=[],
+        per_message=False,
+    )
+
+    shop_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(add_shop_start, pattern="^add_shop$")],
+        states={
+            WAITING_SHOP_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_shop_name)],
+            WAITING_SHOP_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_shop_desc)],
+        },
+        fallbacks=[],
+        per_message=False,
+    )
+
+    product_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(add_product_start, pattern="^add_product$")],
+        states={
+            WAITING_PRODUCT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_product_name)],
+            WAITING_PRODUCT_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_product_desc)],
+            WAITING_PRODUCT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_product_price)],
+            WAITING_PRODUCT_PHOTO: [
+                MessageHandler(filters.PHOTO, got_product_photo),
+                MessageHandler(filters.TEXT & filters.Regex(r'^/skip$'), got_product_photo),
+            ],
+        },
+        fallbacks=[],
+        per_message=False,
+    )
+
+    review_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(give_rating, pattern=r"^give_rating_\d+_\d+$")],
+        states={WAITING_REVIEW: [MessageHandler(filters.TEXT, got_review)]},
+        fallbacks=[],
+        per_message=False,
+    )
+
+    ticket_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(ticket_open, pattern="^ticket_open$")],
+        states={WAITING_TICKET_MSG: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_ticket_msg)]},
+        fallbacks=[],
+        per_message=False,
+    )
+
+    ticket_reply_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(ticket_reply_prompt, pattern=r"^ticket_reply_\d+$")],
+        states={WAITING_TICKET_REPLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_ticket_reply)]},
+        fallbacks=[],
+        per_message=False,
+    )
+
+    courier_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(add_courier_start, pattern="^add_courier$")],
+        states={WAITING_COURIER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_courier_info)]},
+        fallbacks=[],
+        per_message=False,
+    )
+
+    promo_create_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(create_promo_start, pattern="^create_promo$")],
+        states={WAITING_PROMO_CODE_CREATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_promo_create)]},
+        fallbacks=[],
+        per_message=False,
+    )
+
+    commission_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_commission, pattern="^admin_commission$")],
+        states={WAITING_COMMISSION: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_commission)]},
+        fallbacks=[],
+        per_message=False,
+    )
+
+    broadcast_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_broadcast_start, pattern="^admin_broadcast$")],
+        states={WAITING_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_broadcast)]},
+        fallbacks=[],
+        per_message=False,
+    )
+
+    delivery_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(set_delivery_price, pattern=r"^set_delivery_\d+$")],
+        states={WAITING_DELIVERY_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_delivery_price)]},
+        fallbacks=[],
+        per_message=False,
+    )
+
+    hours_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(set_work_hours, pattern=r"^set_hours_\d+$")],
+        states={WAITING_WORK_HOURS: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_work_hours)]},
+        fallbacks=[],
+        per_message=False,
+    )
+
+    edit_price_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(edit_product_price, pattern=r"^edit_price_\d+$")],
+        states={WAITING_PRODUCT_EDIT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_edit_price)]},
+        fallbacks=[],
+        per_message=False,
+    )
+
+    discount_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(set_product_discount, pattern=r"^set_discount_\d+$")],
+        states={WAITING_PRODUCT_DISCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_product_discount)]},
+        fallbacks=[],
+        per_message=False,
+    )
+
+    operator_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(operator_new_order, pattern="^operator_new_order$")],
+        states={WAITING_OPERATOR_ORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_operator_order)]},
+        fallbacks=[],
+        per_message=False,
+    )
+
+    # Add handlers
+    for conv in [
+        checkout_conv, payment_screenshot_conv, promo_conv, shop_conv, product_conv,
+        review_conv, ticket_conv, ticket_reply_conv, courier_conv, promo_create_conv,
+        commission_conv, broadcast_conv, delivery_conv, hours_conv, edit_price_conv,
+        discount_conv, operator_conv,
+    ]:
+        app.add_handler(conv)
+
+    app.add_handler(CommandHandler("start", start))
+
+    # Callback handlers
+    app.add_handler(CallbackQueryHandler(main_menu_cb, pattern="^main_menu$"))
+    app.add_handler(CallbackQueryHandler(shops_list, pattern="^shops_list$"))
+    app.add_handler(CallbackQueryHandler(shop_detail, pattern=r"^shop_\d+$"))
+    app.add_handler(CallbackQueryHandler(products_list, pattern=r"^products_\d+$"))
+    app.add_handler(CallbackQueryHandler(product_detail, pattern=r"^product_\d+$"))
+    app.add_handler(CallbackQueryHandler(add_to_cart, pattern=r"^add_cart_\d+$"))
+    app.add_handler(CallbackQueryHandler(cart_view, pattern="^cart_view$"))
+    app.add_handler(CallbackQueryHandler(cart_update, pattern=r"^cart_(inc|dec|del)_\d+$"))
+    app.add_handler(CallbackQueryHandler(cart_clear, pattern="^cart_clear$"))
+    app.add_handler(CallbackQueryHandler(payment_method, pattern="^pay_(card|cash)$"))
+    app.add_handler(CallbackQueryHandler(my_orders, pattern="^my_orders$"))
+    app.add_handler(CallbackQueryHandler(order_detail, pattern=r"^order_detail_\d+$"))
+    app.add_handler(CallbackQueryHandler(reorder, pattern=r"^reorder_\d+$"))
+    app.add_handler(CallbackQueryHandler(admin_confirm_order, pattern=r"^admin_confirm_\d+$"))
+    app.add_handler(CallbackQueryHandler(admin_reject_order, pattern=r"^admin_reject_\d+$"))
+    app.add_handler(CallbackQueryHandler(shop_confirm_order, pattern=r"^shop_confirm_\d+$"))
+    app.add_handler(CallbackQueryHandler(shop_reject_order, pattern=r"^shop_reject_\d+$"))
+    app.add_handler(CallbackQueryHandler(courier_accept, pattern=r"^courier_accept_\d+$"))
+    app.add_handler(CallbackQueryHandler(courier_reject, pattern=r"^courier_reject_\d+$"))
+    app.add_handler(CallbackQueryHandler(courier_delivered, pattern=r"^courier_delivered_\d+$"))
+    app.add_handler(CallbackQueryHandler(profile_view, pattern="^profile$"))
+    app.add_handler(CallbackQueryHandler(favorites_view, pattern="^favorites$"))
+    app.add_handler(CallbackQueryHandler(add_favorite, pattern=r"^fav_\d+$"))
+    app.add_handler(CallbackQueryHandler(remove_favorite, pattern=r"^unfav_\d+$"))
+    app.add_handler(CallbackQueryHandler(rate_order, pattern=r"^rate_order_\d+$"))
+    app.add_handler(CallbackQueryHandler(give_rating, pattern=r"^give_rating_\d+_\d+$"))
+    app.add_handler(CallbackQueryHandler(rate_shop, pattern=r"^rate_shop_\d+$"))
+    app.add_handler(CallbackQueryHandler(give_shop_rating, pattern=r"^shop_rating_\d+_\d+$"))
+    app.add_handler(CallbackQueryHandler(referral_view, pattern="^referral$"))
+    app.add_handler(CallbackQueryHandler(my_shop, pattern="^my_shop$"))
+    app.add_handler(CallbackQueryHandler(shop_settings, pattern=r"^shop_settings_\d+$"))
+    app.add_handler(CallbackQueryHandler(owner_products, pattern=r"^owner_products_\d+$"))
+    app.add_handler(CallbackQueryHandler(owner_product_detail, pattern=r"^owner_prod_\d+$"))
+    app.add_handler(CallbackQueryHandler(toggle_product, pattern=r"^toggle_prod_\d+$"))
+    app.add_handler(CallbackQueryHandler(shop_orders, pattern="^shop_orders$"))
+    app.add_handler(CallbackQueryHandler(shop_report, pattern="^shop_report$"))
+    app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
+    app.add_handler(CallbackQueryHandler(admin_shops, pattern="^admin_shops$"))
+    app.add_handler(CallbackQueryHandler(admin_shop_detail, pattern=r"^admin_shop_\d+$"))
+    app.add_handler(CallbackQueryHandler(admin_shop_approve, pattern=r"^admin_shop_approve_\d+$"))
+    app.add_handler(CallbackQueryHandler(admin_shop_reject, pattern=r"^admin_shop_reject_\d+$"))
+    app.add_handler(CallbackQueryHandler(admin_users, pattern="^admin_users$"))
+    app.add_handler(CallbackQueryHandler(admin_orders, pattern="^admin_orders$"))
+    app.add_handler(CallbackQueryHandler(admin_order_detail, pattern=r"^admin_order_\d+$"))
+    app.add_handler(CallbackQueryHandler(admin_couriers, pattern="^admin_couriers$"))
+    app.add_handler(CallbackQueryHandler(admin_promos, pattern="^admin_promos$"))
+    app.add_handler(CallbackQueryHandler(admin_tickets, pattern="^admin_tickets$"))
+    app.add_handler(CallbackQueryHandler(admin_excel, pattern="^admin_excel$"))
+    app.add_handler(CallbackQueryHandler(admin_settings, pattern="^admin_settings$"))
+    app.add_handler(CallbackQueryHandler(operator_panel, pattern="^operator_panel$"))
+    app.add_handler(CallbackQueryHandler(courier_orders, pattern="^courier_orders$"))
+    app.add_handler(CallbackQueryHandler(courier_stats, pattern="^courier_stats$"))
+    app.add_handler(CallbackQueryHandler(noop, pattern="^noop$"))
+
+    logger.info("🚀 OsonSavdo Bot ishga tushdi!")
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()
