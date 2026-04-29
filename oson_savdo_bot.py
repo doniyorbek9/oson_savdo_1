@@ -1352,13 +1352,10 @@ async def rate_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["rating_order_id"] = order_id
 
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("⭐", callback_data=f"give_rating_{order_id}_1"),
-        InlineKeyboardButton("⭐⭐", callback_data=f"give_rating_{order_id}_2"),
-        InlineKeyboardButton("⭐⭐⭐", callback_data=f"give_rating_{order_id}_3"),
-        InlineKeyboardButton("⭐⭐⭐⭐", callback_data=f"give_rating_{order_id}_4"),
-        InlineKeyboardButton("⭐⭐⭐⭐⭐", callback_data=f"give_rating_{order_id}_5"),
+        InlineKeyboardButton(f"⭐ {i}", callback_data=f"give_rating_{order_id}_{i}")
+        for i in range(1, 6)
     ]])
-    await q.edit_message_text("⭐ Xizmatni baholang:", reply_markup=kb)
+    await q.edit_message_text("⭐ Xizmatni baholang (1-5):", reply_markup=kb)
 
 async def give_rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1425,10 +1422,10 @@ async def rate_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["rating_shop_id"] = shop_id
 
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"{i}⭐", callback_data=f"shop_rating_{shop_id}_{i}")
+        InlineKeyboardButton(f"⭐ {i}", callback_data=f"shop_rating_{shop_id}_{i}")
         for i in range(1, 6)
     ]])
-    await q.edit_message_text("⭐ Do'konni baholang:", reply_markup=kb)
+    await q.edit_message_text("⭐ Do'konni baholang (1-5):", reply_markup=kb)
 
 async def give_shop_rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -2385,6 +2382,7 @@ async def admin_shop_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif s["status"] == "approved":
         buttons.append([InlineKeyboardButton("🚫 Bloklash", callback_data=f"admin_shop_reject_{shop_id}")])
 
+    buttons.append([InlineKeyboardButton("🗑 Do'konni o'chirish", callback_data=f"admin_shop_delete_{shop_id}")])
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_shops")])
     await q.edit_message_text(
         f"🏪 <b>{s['name']}</b>\n"
@@ -2431,6 +2429,35 @@ async def admin_shop_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(s["owner_tg_id"], f"❌ Do'koningiz '{s['name']}' rad etildi.")
         except:
             pass
+
+async def admin_shop_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    shop_id = int(q.data.split("_")[3])
+
+    conn = get_db()
+    s = conn.execute("SELECT * FROM shops WHERE id=?", (shop_id,)).fetchone()
+    if s:
+        conn.execute("DELETE FROM products WHERE shop_id=?", (shop_id,))
+        conn.execute("DELETE FROM favorites WHERE shop_id=?", (shop_id,))
+        conn.execute("DELETE FROM reviews WHERE shop_id=?", (shop_id,))
+        conn.execute("UPDATE users SET role='customer' WHERE tg_id=?", (s["owner_tg_id"],))
+        conn.execute("DELETE FROM shops WHERE id=?", (shop_id,))
+        conn.commit()
+        try:
+            await context.bot.send_message(
+                s["owner_tg_id"],
+                f"❌ Sizning <b>{s['name']}</b> do'koningiz admin tomonidan o'chirildi.",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+    conn.close()
+
+    await q.edit_message_text(
+        f"🗑 Do'kon muvaffaqiyatli o'chirildi.",
+        reply_markup=back_kb("admin_shops")
+    )
 
 async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -2518,19 +2545,84 @@ async def admin_couriers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     couriers = conn.execute("SELECT * FROM couriers ORDER BY id DESC").fetchall()
     conn.close()
 
-    text = "🚴 <b>Kuryerlar:</b>\n\n"
     if not couriers:
-        text += "Kuryerlar yo'q.\n"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Kuryer qo'shish", callback_data="add_courier")],
+            [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")],
+        ])
+        await q.edit_message_text("🚴 Kuryerlar yo'q.", reply_markup=kb)
+        return
+
+    buttons = []
     for c in couriers:
-        busy = "🔴 Band" if c["is_busy"] else "🟢 Bo'sh"
-        prem = "⚡" if c["is_premium"] else ""
-        text += f"{prem} {c['name']} | {busy} | {c['total_deliveries']} yetkazish\n"
+        busy = "🔴" if c["is_busy"] else "🟢"
+        prem = "⚡" if c["is_premium"] else "🚴"
+        buttons.append([InlineKeyboardButton(
+            f"{prem} {busy} {c['name']} ({c['total_deliveries']} ta)",
+            callback_data=f"admin_courier_detail_{c['tg_id']}"
+        )])
+
+    buttons.append([InlineKeyboardButton("➕ Kuryer qo'shish", callback_data="add_courier")])
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")])
+    await q.edit_message_text(
+        "🚴 <b>Kuryerlar:</b>",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML"
+    )
+
+async def admin_courier_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    courier_tg_id = int(q.data.split("_")[3])
+
+    conn = get_db()
+    c = conn.execute("SELECT * FROM couriers WHERE tg_id=?", (courier_tg_id,)).fetchone()
+    conn.close()
+
+    if not c:
+        await q.answer("Topilmadi", show_alert=True)
+        return
+
+    busy = "🔴 Band" if c["is_busy"] else "🟢 Bo'sh"
+    prem = "⚡ Premium" if c["is_premium"] else "Oddiy"
+    text = (
+        f"🚴 <b>{c['name']}</b>\n\n"
+        f"📊 Holat: {busy}\n"
+        f"🏷 Tur: {prem}\n"
+        f"📦 Yetkazishlar: {c['total_deliveries']}\n"
+        f"🆔 Telegram ID: {c['tg_id']}\n"
+    )
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Kuryer qo'shish", callback_data="add_courier")],
-        [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")],
+        [InlineKeyboardButton("🔥 Ishdan bo'shatish", callback_data=f"admin_courier_fire_{courier_tg_id}")],
+        [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_couriers")],
     ])
     await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+
+async def admin_courier_fire(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    courier_tg_id = int(q.data.split("_")[3])
+
+    conn = get_db()
+    c = conn.execute("SELECT name FROM couriers WHERE tg_id=?", (courier_tg_id,)).fetchone()
+    conn.execute("DELETE FROM couriers WHERE tg_id=?", (courier_tg_id,))
+    conn.execute("UPDATE users SET role='customer' WHERE tg_id=?", (courier_tg_id,))
+    conn.commit()
+    conn.close()
+
+    name = c["name"] if c else str(courier_tg_id)
+    await q.edit_message_text(
+        f"✅ {name} ishdan bo'shatildi.",
+        reply_markup=back_kb("admin_couriers")
+    )
+    try:
+        await context.bot.send_message(
+            courier_tg_id,
+            "❌ Siz OsonSavdo kuryer tizimidan chiqarildingiz."
+        )
+    except:
+        pass
 
 async def add_courier_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -3131,6 +3223,9 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_job_requests, pattern="^admin_job_requests$"))
     app.add_handler(CallbackQueryHandler(admin_courier_approve, pattern=r"^admin_courier_approve_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_courier_reject, pattern=r"^admin_courier_reject_\d+$"))
+    app.add_handler(CallbackQueryHandler(admin_courier_detail, pattern=r"^admin_courier_detail_\d+$"))
+    app.add_handler(CallbackQueryHandler(admin_courier_fire, pattern=r"^admin_courier_fire_\d+$"))
+    app.add_handler(CallbackQueryHandler(admin_shop_delete, pattern=r"^admin_shop_delete_\d+$"))
 
     logger.info("🚀 OsonSavdo Bot ishga tushdi!")
     app.run_polling(drop_pending_updates=True)
