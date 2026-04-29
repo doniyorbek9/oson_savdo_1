@@ -57,7 +57,8 @@ logger = logging.getLogger(__name__)
     WAITING_SHOP_EDIT, WAITING_PRODUCT_DISCOUNT,
     WAITING_JOB_SHOP_NAME, WAITING_JOB_SHOP_DESC,
     WAITING_ADMIN_SHOP_NAME, WAITING_ADMIN_SHOP_DESC, WAITING_ADMIN_SHOP_OWNER,
-) = range(31)
+    WAITING_CARD_NUMBER, WAITING_CARD_HOLDER,
+) = range(33)
 
 # ─── DATABASE ──────────────────────────────────────────────────────────────────
 def get_db():
@@ -101,6 +102,8 @@ def init_db():
         work_hours TEXT DEFAULT '09:00-22:00',
         rating REAL DEFAULT 0,
         total_reviews INTEGER DEFAULT 0,
+        card_number TEXT DEFAULT '',
+        card_holder TEXT DEFAULT '',
         created_at TEXT DEFAULT (datetime('now'))
     );
 
@@ -235,6 +238,21 @@ def init_db():
     for key, val in defaults:
         c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, val))
 
+    conn.commit()
+    conn.close()
+
+def migrate_db():
+    """Eski DB ga yangi ustunlar qo'shish"""
+    conn = get_db()
+    c = conn.cursor()
+    try:
+        c.execute("ALTER TABLE shops ADD COLUMN card_number TEXT DEFAULT ''")
+    except:
+        pass
+    try:
+        c.execute("ALTER TABLE shops ADD COLUMN card_holder TEXT DEFAULT ''")
+    except:
+        pass
     conn.commit()
     conn.close()
 
@@ -770,13 +788,25 @@ async def courier_type_select(update: Update, context: ContextTypes.DEFAULT_TYPE
         promo = context.user_data.get("promo_discount", 0)
         total -= promo
 
-        # Get shop delivery price
+        # Get shop delivery price and card info
         shop_id = list(cart.values())[0]["shop_id"] if cart else None
+        card_info_text = ""
         if shop_id:
             conn = get_db()
-            shop = conn.execute("SELECT delivery_price FROM shops WHERE id=?", (shop_id,)).fetchone()
+            shop = conn.execute("SELECT delivery_price, card_number, card_holder FROM shops WHERE id=?", (shop_id,)).fetchone()
             conn.close()
             delivery = shop["delivery_price"] if shop else 0
+            if shop and shop["card_number"]:
+                cn = shop["card_number"]
+                formatted_card = " ".join([cn[i:i+4] for i in range(0, len(cn), 4)])
+                card_info_text = (
+                    f"\n\n💳 <b>To'lov kartasi:</b>\n"
+                    f"🔢 Raqam: <code>{formatted_card}</code>\n"
+                    f"👤 Ism: <b>{shop['card_holder'] or ''}</b>\n\n"
+                    f"⬆️ Ushbu kartaga o'tkazma qiling, so'ng chekni yuboring."
+                )
+            else:
+                card_info_text = "\n\n⚠️ Do'kon karta ma'lumotlarini hali kiritмagan. Aloqa qiling."
         else:
             delivery = 0
 
@@ -785,7 +815,8 @@ async def courier_type_select(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         await q.edit_message_text(
             f"💳 <b>Karta orqali to'lov</b>\n\n"
-            f"💰 Jami: <b>{format_price(grand_total)}</b>\n\n"
+            f"💰 Jami: <b>{format_price(grand_total)}</b>"
+            f"{card_info_text}\n\n"
             f"📸 To'lov chekini (screenshot) yuboring:",
             parse_mode="HTML"
         )
@@ -1630,12 +1661,25 @@ async def shop_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     shop_id = int(q.data.split("_")[2])
 
+    conn = get_db()
+    shop = conn.execute("SELECT * FROM shops WHERE id=?", (shop_id,)).fetchone()
+    conn.close()
+
+    card_info = ""
+    if shop and shop["card_number"]:
+        card_info = f"\n\n💳 Joriy karta: <b>{shop['card_number']}</b>\n👤 Ism: <b>{shop['card_holder'] or 'Kiritilmagan'}</b>"
+
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💰 Yetkazish narxi", callback_data=f"set_delivery_{shop_id}"),
          InlineKeyboardButton("⏰ Ish vaqti", callback_data=f"set_hours_{shop_id}")],
+        [InlineKeyboardButton("💳 To'lov tizimini tahrirlash", callback_data=f"set_payment_{shop_id}")],
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="my_shop")],
     ])
-    await q.edit_message_text("⚙️ Do'kon sozlamalari:", reply_markup=kb)
+    await q.edit_message_text(
+        f"⚙️ Do'kon sozlamalari:{card_info}",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
 
 async def set_delivery_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1685,7 +1729,84 @@ async def got_work_hours(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Ish vaqti {hours} ga o'zgartirildi!", reply_markup=back_kb("my_shop"))
     return ConversationHandler.END
 
-# ─── ISHGA KIRISH (JOB APPLY) ──────────────────────────────────────────────────
+# ─── TO'LOV TIZIMI SOZLAMALARI ─────────────────────────────────────────────────
+async def set_payment_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    parts = q.data.split("_")
+    shop_id = int(parts[2])
+    context.user_data["payment_shop_id"] = shop_id
+
+    conn = get_db()
+    shop = conn.execute("SELECT * FROM shops WHERE id=?", (shop_id,)).fetchone()
+    conn.close()
+
+    current = ""
+    if shop and shop["card_number"]:
+        current = (
+            f"\n\n📌 Joriy ma'lumot:\n"
+            f"💳 Karta: <b>{shop['card_number']}</b>\n"
+            f"👤 Ism: <b>{shop['card_holder'] or 'Kiritilmagan'}</b>"
+        )
+
+    await q.edit_message_text(
+        f"💳 <b>To'lov tizimini sozlash</b>{current}\n\n"
+        f"Karta raqamini kiriting (16 raqam, bo'shliqlarsiz):\n"
+        f"Masalan: <code>8600123456789012</code>",
+        parse_mode="HTML",
+        reply_markup=back_kb(f"shop_settings_{shop_id}")
+    )
+    return WAITING_CARD_NUMBER
+
+async def got_card_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    number = update.message.text.strip().replace(" ", "").replace("-", "")
+    if not number.isdigit() or len(number) < 13 or len(number) > 19:
+        await update.message.reply_text(
+            "❌ Noto'g'ri karta raqami. 13-19 ta raqam kiriting.\n"
+            "Masalan: <code>8600123456789012</code>",
+            parse_mode="HTML"
+        )
+        return WAITING_CARD_NUMBER
+
+    context.user_data["new_card_number"] = number
+    await update.message.reply_text(
+        f"✅ Karta raqami: <b>{number}</b>\n\n"
+        f"👤 Endi karta egasining ismini kiriting (to'liq ism):\n"
+        f"Masalan: <code>ALISHER KARIMOV</code>",
+        parse_mode="HTML"
+    )
+    return WAITING_CARD_HOLDER
+
+async def got_card_holder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    holder = update.message.text.strip().upper()
+    if len(holder) < 3:
+        await update.message.reply_text("❌ Ism juda qisqa. To'liq ismni kiriting.")
+        return WAITING_CARD_HOLDER
+
+    shop_id = context.user_data.pop("payment_shop_id", None)
+    card_number = context.user_data.pop("new_card_number", "")
+
+    if shop_id:
+        conn = get_db()
+        conn.execute(
+            "UPDATE shops SET card_number=?, card_holder=? WHERE id=?",
+            (card_number, holder, shop_id)
+        )
+        conn.commit()
+        conn.close()
+
+    # Format card number with spaces for display
+    formatted = " ".join([card_number[i:i+4] for i in range(0, len(card_number), 4)])
+
+    await update.message.reply_text(
+        f"✅ <b>To'lov tizimi yangilandi!</b>\n\n"
+        f"💳 Karta: <b>{formatted}</b>\n"
+        f"👤 Ism: <b>{holder}</b>\n\n"
+        f"Endi mijozlar karta orqali to'lov qilganda shu ma'lumotni ko'radi.",
+        parse_mode="HTML",
+        reply_markup=back_kb(f"shop_settings_{shop_id}")
+    )
+    return ConversationHandler.END
 async def job_apply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -2405,14 +2526,25 @@ async def admin_shop_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif s["status"] == "approved":
         buttons.append([InlineKeyboardButton("🚫 Bloklash", callback_data=f"admin_shop_reject_{shop_id}")])
 
+    buttons.append([InlineKeyboardButton("💳 To'lov tizimini tahrirlash", callback_data=f"admin_set_payment_{shop_id}")])
     buttons.append([InlineKeyboardButton("🗑 Do'konni o'chirish", callback_data=f"admin_shop_delete_{shop_id}")])
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_shops")])
+
+    card_text = ""
+    if s["card_number"]:
+        cn = s["card_number"]
+        formatted_card = " ".join([cn[i:i+4] for i in range(0, len(cn), 4)])
+        card_text = f"\n💳 Karta: <b>{formatted_card}</b>\n👤 Ism: <b>{s['card_holder'] or 'Kiritilmagan'}</b>"
+    else:
+        card_text = "\n💳 Karta: <i>Kiritilmagan</i>"
+
     await q.edit_message_text(
         f"🏪 <b>{s['name']}</b>\n"
         f"📝 {s['description']}\n"
         f"Egasi ID: {s['owner_tg_id']}\n"
         f"Holat: {s['status']}\n"
-        f"⭐ {s['rating']:.1f} ({s['total_reviews']} sharh)",
+        f"⭐ {s['rating']:.1f} ({s['total_reviews']} sharh)"
+        f"{card_text}",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML"
     )
@@ -2482,7 +2614,83 @@ async def admin_shop_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=back_kb("admin_shops")
     )
 
-async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ─── ADMIN TO'LOV TIZIMI TAHRIRLASH ────────────────────────────────────────────
+async def admin_set_payment_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    parts = q.data.split("_")
+    shop_id = int(parts[3])
+    context.user_data["admin_payment_shop_id"] = shop_id
+
+    conn = get_db()
+    shop = conn.execute("SELECT * FROM shops WHERE id=?", (shop_id,)).fetchone()
+    conn.close()
+
+    current = ""
+    if shop and shop["card_number"]:
+        cn = shop["card_number"]
+        formatted_card = " ".join([cn[i:i+4] for i in range(0, len(cn), 4)])
+        current = (
+            f"\n\n📌 Joriy ma'lumot:\n"
+            f"💳 Karta: <b>{formatted_card}</b>\n"
+            f"👤 Ism: <b>{shop['card_holder'] or 'Kiritilmagan'}</b>"
+        )
+
+    await q.edit_message_text(
+        f"💳 <b>Admin: '{shop['name'] if shop else ''}' do'koni to'lov tizimi</b>{current}\n\n"
+        f"Yangi karta raqamini kiriting (13-19 ta raqam):\n"
+        f"Masalan: <code>8600123456789012</code>",
+        parse_mode="HTML",
+        reply_markup=back_kb(f"admin_shop_{shop_id}")
+    )
+    return WAITING_CARD_NUMBER
+
+async def admin_got_card_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    number = update.message.text.strip().replace(" ", "").replace("-", "")
+    if not number.isdigit() or len(number) < 13 or len(number) > 19:
+        await update.message.reply_text(
+            "❌ Noto'g'ri karta raqami. 13-19 ta raqam kiriting.\n"
+            "Masalan: <code>8600123456789012</code>",
+            parse_mode="HTML"
+        )
+        return WAITING_CARD_NUMBER
+
+    context.user_data["admin_new_card_number"] = number
+    await update.message.reply_text(
+        f"✅ Karta raqami: <b>{number}</b>\n\n"
+        f"👤 Karta egasining ismini kiriting:\n"
+        f"Masalan: <code>ALISHER KARIMOV</code>",
+        parse_mode="HTML"
+    )
+    return WAITING_CARD_HOLDER
+
+async def admin_got_card_holder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    holder = update.message.text.strip().upper()
+    if len(holder) < 3:
+        await update.message.reply_text("❌ Ism juda qisqa.")
+        return WAITING_CARD_HOLDER
+
+    shop_id = context.user_data.pop("admin_payment_shop_id", None)
+    card_number = context.user_data.pop("admin_new_card_number", "")
+
+    if shop_id:
+        conn = get_db()
+        conn.execute(
+            "UPDATE shops SET card_number=?, card_holder=? WHERE id=?",
+            (card_number, holder, shop_id)
+        )
+        conn.commit()
+        conn.close()
+
+    formatted = " ".join([card_number[i:i+4] for i in range(0, len(card_number), 4)])
+    await update.message.reply_text(
+        f"✅ <b>Do'kon to'lov tizimi yangilandi!</b>\n\n"
+        f"💳 Karta: <b>{formatted}</b>\n"
+        f"👤 Ism: <b>{holder}</b>",
+        parse_mode="HTML",
+        reply_markup=back_kb(f"admin_shop_{shop_id}")
+    )
+    return ConversationHandler.END
     q = update.callback_query
     await q.answer()
 
@@ -3021,6 +3229,7 @@ async def main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── APPLICATION ───────────────────────────────────────────────────────────────
 def main():
     init_db()
+    migrate_db()
 
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -3176,6 +3385,28 @@ def main():
         per_message=False,
     )
 
+    # Do'kon egasi to'lov tizimi
+    payment_settings_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(set_payment_settings, pattern=r"^set_payment_\d+$")],
+        states={
+            WAITING_CARD_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_card_number)],
+            WAITING_CARD_HOLDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_card_holder)],
+        },
+        fallbacks=[],
+        per_message=False,
+    )
+
+    # Admin to'lov tizimi
+    admin_payment_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_set_payment_start, pattern=r"^admin_set_payment_\d+$")],
+        states={
+            WAITING_CARD_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_got_card_number)],
+            WAITING_CARD_HOLDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_got_card_holder)],
+        },
+        fallbacks=[],
+        per_message=False,
+    )
+
     # Add handlers
     for conv in [
         admin_add_shop_conv,
@@ -3183,6 +3414,7 @@ def main():
         review_conv, ticket_conv, ticket_reply_conv, courier_conv, promo_create_conv,
         commission_conv, broadcast_conv, delivery_conv, hours_conv, edit_price_conv,
         discount_conv, operator_conv, job_shop_conv,
+        payment_settings_conv, admin_payment_conv,
     ]:
         app.add_handler(conv)
 
@@ -3220,6 +3452,7 @@ def main():
     app.add_handler(CallbackQueryHandler(referral_view, pattern="^referral$"))
     app.add_handler(CallbackQueryHandler(my_shop, pattern="^my_shop$"))
     app.add_handler(CallbackQueryHandler(shop_settings, pattern=r"^shop_settings_\d+$"))
+    app.add_handler(CallbackQueryHandler(set_payment_settings, pattern=r"^set_payment_\d+$"))
     app.add_handler(CallbackQueryHandler(owner_products, pattern=r"^owner_products_\d+$"))
     app.add_handler(CallbackQueryHandler(owner_product_detail, pattern=r"^owner_prod_\d+$"))
     app.add_handler(CallbackQueryHandler(toggle_product, pattern=r"^toggle_prod_\d+$"))
@@ -3250,6 +3483,7 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_courier_detail, pattern=r"^admin_courier_detail_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_courier_fire, pattern=r"^admin_courier_fire_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_shop_delete, pattern=r"^admin_shop_delete_\d+$"))
+    app.add_handler(CallbackQueryHandler(admin_set_payment_start, pattern=r"^admin_set_payment_\d+$"))
 
     logger.info("🚀 OsonSavdo Bot ishga tushdi!")
     app.run_polling(drop_pending_updates=True)
