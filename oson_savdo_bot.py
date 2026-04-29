@@ -59,7 +59,9 @@ logger = logging.getLogger(__name__)
     WAITING_ADMIN_SHOP_NAME, WAITING_ADMIN_SHOP_DESC, WAITING_ADMIN_SHOP_OWNER,
     WAITING_CARD_NUMBER, WAITING_CARD_HOLDER,
     WAITING_SUB_PERCENT,
-) = range(34)
+    WAITING_PROMO_CODE, WAITING_PROMO_TYPE, WAITING_PROMO_VALUE,
+    WAITING_PROMO_LIMIT, WAITING_PROMO_DAYS,
+) = range(39)
 
 # ─── DATABASE ──────────────────────────────────────────────────────────────────
 def get_db():
@@ -3171,25 +3173,123 @@ async def admin_promos(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def create_promo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+    context.user_data.pop("new_promo", None)
     await q.edit_message_text(
-        "🎫 Promo kod ma'lumotlarini kiriting:\n\n"
-        "Format: KOD|tur(percent/fixed)|qiymat|limit|kun\n"
-        "Masalan: SUMMER25|percent|25|100|30"
+        "🎫 <b>Yangi promo kod yaratish</b>\n\n"
+        "1-qadam / 5\n\n"
+        "✏️ Promo kod nomini kiriting:\n"
+        "<i>Masalan: SUMMER25, CHEGIRMA10</i>",
+        parse_mode="HTML",
+        reply_markup=back_kb("admin_promos")
     )
-    return WAITING_PROMO_CODE_CREATE
+    return WAITING_PROMO_CODE
 
-async def got_promo_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def got_promo_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    code = update.message.text.strip().upper()
+    if len(code) < 2 or len(code) > 20:
+        await update.message.reply_text("❌ Kod 2-20 belgi orasida bo'lishi kerak. Qayta kiriting:")
+        return WAITING_PROMO_CODE
+
+    context.user_data["new_promo"] = {"code": code}
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Foiz (%)", callback_data="promo_type_percent")],
+        [InlineKeyboardButton("💵 Belgilangan summa", callback_data="promo_type_fixed")],
+    ])
+    await update.message.reply_text(
+        f"✅ Kod: <b>{code}</b>\n\n"
+        f"2-qadam / 5\n\n"
+        f"💰 Chegirma turini tanlang:",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+    return WAITING_PROMO_TYPE
+
+async def got_promo_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    dtype = "percent" if q.data == "promo_type_percent" else "fixed"
+    context.user_data["new_promo"]["type"] = dtype
+
+    if dtype == "percent":
+        hint = "Masalan: <code>25</code>  →  25% chegirma"
+        unit = "%"
+    else:
+        hint = "Masalan: <code>10000</code>  →  10,000 so'm chegirma"
+        unit = "so'm"
+
+    await q.edit_message_text(
+        f"✅ Tur: <b>{'Foiz (%)' if dtype == 'percent' else 'Belgilangan summa'}</b>\n\n"
+        f"3-qadam / 5\n\n"
+        f"🔢 Chegirma miqdorini kiriting ({unit}):\n"
+        f"<i>{hint}</i>",
+        parse_mode="HTML",
+        reply_markup=back_kb("admin_promos")
+    )
+    return WAITING_PROMO_VALUE
+
+async def got_promo_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        parts = update.message.text.strip().split("|")
-        code = parts[0].upper()
-        dtype = parts[1]
-        value = float(parts[2])
-        limit = int(parts[3])
-        days = int(parts[4])
-        expires = (datetime.now() + timedelta(days=days)).isoformat()
+        value = float(update.message.text.strip().replace(" ", ""))
+        if value <= 0:
+            raise ValueError
+        promo = context.user_data.get("new_promo", {})
+        if promo.get("type") == "percent" and value > 100:
+            await update.message.reply_text("❌ Foiz 100% dan oshmasin. Qayta kiriting:")
+            return WAITING_PROMO_VALUE
     except:
-        await update.message.reply_text("❌ Format: KOD|tur|qiymat|limit|kun")
-        return WAITING_PROMO_CODE_CREATE
+        await update.message.reply_text("❌ Noto'g'ri raqam. Qayta kiriting:")
+        return WAITING_PROMO_VALUE
+
+    context.user_data["new_promo"]["value"] = value
+    dtype = context.user_data["new_promo"]["type"]
+    unit = "%" if dtype == "percent" else " so'm"
+
+    await update.message.reply_text(
+        f"✅ Chegirma: <b>{value}{unit}</b>\n\n"
+        f"4-qadam / 5\n\n"
+        f"👥 Necha marta ishlatish mumkin? (foydalanish limiti)\n"
+        f"<i>Masalan: <code>100</code></i>",
+        parse_mode="HTML"
+    )
+    return WAITING_PROMO_LIMIT
+
+async def got_promo_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        limit = int(update.message.text.strip())
+        if limit <= 0:
+            raise ValueError
+    except:
+        await update.message.reply_text("❌ Noto'g'ri raqam. Butun son kiriting:")
+        return WAITING_PROMO_LIMIT
+
+    context.user_data["new_promo"]["limit"] = limit
+
+    await update.message.reply_text(
+        f"✅ Limit: <b>{limit} marta</b>\n\n"
+        f"5-qadam / 5\n\n"
+        f"📅 Necha kun amal qiladi?\n"
+        f"<i>Masalan: <code>30</code>  →  30 kun</i>",
+        parse_mode="HTML"
+    )
+    return WAITING_PROMO_DAYS
+
+async def got_promo_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        days = int(update.message.text.strip())
+        if days <= 0:
+            raise ValueError
+    except:
+        await update.message.reply_text("❌ Noto'g'ri raqam. Kunlar sonini kiriting:")
+        return WAITING_PROMO_DAYS
+
+    promo = context.user_data.pop("new_promo", {})
+    code = promo.get("code", "")
+    dtype = promo.get("type", "percent")
+    value = promo.get("value", 0)
+    limit = promo.get("limit", 100)
+    expires = (datetime.now() + timedelta(days=days)).isoformat()
+    unit = "%" if dtype == "percent" else " so'm"
 
     conn = get_db()
     try:
@@ -3199,14 +3299,20 @@ async def got_promo_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         conn.commit()
         await update.message.reply_text(
-            f"✅ Promo kod yaratildi!\n🎫 Kod: <code>{code}</code>\n"
-            f"💰 Chegirma: {value}{'%' if dtype == 'percent' else ' so\'m'}\n"
-            f"📅 {days} kun amal qiladi",
+            f"✅ <b>Promo kod muvaffaqiyatli yaratildi!</b>\n\n"
+            f"🎫 Kod: <code>{code}</code>\n"
+            f"💰 Chegirma: <b>{value}{unit}</b>\n"
+            f"👥 Limit: <b>{limit} marta</b>\n"
+            f"📅 Muddati: <b>{days} kun</b> ({expires[:10]} gacha)",
             parse_mode="HTML",
             reply_markup=back_kb("admin_promos")
         )
     except:
-        await update.message.reply_text("❌ Bu kod allaqachon mavjud.")
+        await update.message.reply_text(
+            f"❌ <b>{code}</b> kodi allaqachon mavjud!",
+            parse_mode="HTML",
+            reply_markup=back_kb("admin_promos")
+        )
     finally:
         conn.close()
 
