@@ -1853,13 +1853,19 @@ async def admin_add_shop_start(update: Update, context: ContextTypes.DEFAULT_TYP
     return WAITING_ADMIN_SHOP_OWNER
 
 async def got_admin_shop_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
     try:
-        owner_id = int(update.message.text.strip())
+        owner_id = int(text)
+        if owner_id <= 0:
+            raise ValueError
         context.user_data["admin_shop_owner_id"] = owner_id
         await update.message.reply_text("🏪 Do'kon nomini kiriting:")
         return WAITING_ADMIN_SHOP_NAME
     except:
-        await update.message.reply_text("❌ Telegram ID noto'g'ri. Raqam kiriting:")
+        await update.message.reply_text(
+            f"❌ Noto'g'ri Telegram ID.\n"
+            f"Faqat musbat raqam kiriting.\nMasalan: 123456789"
+        )
         return WAITING_ADMIN_SHOP_OWNER
 
 async def got_admin_shop_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3155,10 +3161,11 @@ def main():
 
     # Add handlers
     for conv in [
+        admin_add_shop_conv,
         checkout_conv, payment_screenshot_conv, promo_conv, shop_conv, product_conv,
         review_conv, ticket_conv, ticket_reply_conv, courier_conv, promo_create_conv,
         commission_conv, broadcast_conv, delivery_conv, hours_conv, edit_price_conv,
-        discount_conv, operator_conv, job_shop_conv, admin_add_shop_conv,
+        discount_conv, operator_conv, job_shop_conv,
     ]:
         app.add_handler(conv)
 
