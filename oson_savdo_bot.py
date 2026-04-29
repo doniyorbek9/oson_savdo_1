@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
     WAITING_SHOP_EDIT, WAITING_PRODUCT_DISCOUNT,
     WAITING_JOB_SHOP_NAME, WAITING_JOB_SHOP_DESC,
     WAITING_ADMIN_SHOP_NAME, WAITING_ADMIN_SHOP_DESC, WAITING_ADMIN_SHOP_OWNER,
-) = range(29)
+) = range(31)
 
 # ─── DATABASE ──────────────────────────────────────────────────────────────────
 def get_db():
