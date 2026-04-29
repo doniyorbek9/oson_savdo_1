@@ -868,10 +868,9 @@ async def place_order(update, context, screenshot=None):
         f"🚴 Kuryer: {'Premium ⚡' if ctype == 'premium' else 'Oddiy'}\n"
     )
 
-    # Notify admin
+    # Notify admin — faqat ko'rish tugmasi
     admin_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"admin_confirm_{order_id}"),
-         InlineKeyboardButton("❌ Rad etish", callback_data=f"admin_reject_{order_id}")],
+        [InlineKeyboardButton("📋 Buyurtmani ko'rish", callback_data=f"admin_order_{order_id}")],
     ])
     try:
         await context.bot.send_message(ADMIN_ID, order_text, reply_markup=admin_kb, parse_mode="HTML")
@@ -880,16 +879,34 @@ async def place_order(update, context, screenshot=None):
     except:
         pass
 
-    # Notify shop owner
+    # Notify shop owner — qabul/rad tugmalari bilan
     if shop:
         try:
+            items_list = "\n".join([f"  • {v['name']} x{v['qty']} = {format_price(v['price'] * v['qty'])}" for v in cart.values()])
+            shop_notify_text = (
+                f"🛎 <b>Yangi buyurtma #{1000 + order_id}!</b>\n\n"
+                f"👤 Mijoz: {update.effective_user.full_name}\n"
+                f"📦 Mahsulotlar:\n{items_list}\n\n"
+                f"📍 Manzil: {address}\n"
+                f"💰 Mahsulotlar: {format_price(subtotal)}\n"
+                f"🚚 Yetkazish: {format_price(delivery_price)}\n"
+                f"💵 Jami: <b>{format_price(total)}</b>\n"
+                f"💳 To'lov: {'Karta' if payment_method == 'card' else 'Naqd'}\n"
+                f"🚴 Kuryer: {'Premium ⚡' if ctype == 'premium' else 'Oddiy'}\n\n"
+                f"⚡ <b>Iltimos, tezda qabul qiling!</b>"
+            )
             shop_kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Qabul", callback_data=f"shop_confirm_{order_id}"),
-                 InlineKeyboardButton("❌ Rad", callback_data=f"shop_reject_{order_id}")],
+                [InlineKeyboardButton("✅ Qabul qilish", callback_data=f"shop_confirm_{order_id}"),
+                 InlineKeyboardButton("❌ Rad etish", callback_data=f"shop_reject_{order_id}")],
             ])
             await context.bot.send_message(
-                shop["owner_tg_id"], order_text, reply_markup=shop_kb, parse_mode="HTML"
+                shop["owner_tg_id"], shop_notify_text, reply_markup=shop_kb, parse_mode="HTML"
             )
+            if screenshot:
+                await context.bot.send_photo(
+                    shop["owner_tg_id"], screenshot,
+                    caption=f"📸 #{1000 + order_id} — to'lov cheki"
+                )
         except:
             pass
 
