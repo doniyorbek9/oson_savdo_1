@@ -55,7 +55,9 @@ logger = logging.getLogger(__name__)
     WAITING_WORK_HOURS, WAITING_DISCOUNT_PERCENT, WAITING_COMMISSION,
     WAITING_BROADCAST, WAITING_PRODUCT_EDIT_PRICE, WAITING_REFERRAL,
     WAITING_SHOP_EDIT, WAITING_PRODUCT_DISCOUNT,
-) = range(26)
+    WAITING_JOB_SHOP_NAME, WAITING_JOB_SHOP_DESC,
+    WAITING_ADMIN_SHOP_NAME, WAITING_ADMIN_SHOP_DESC, WAITING_ADMIN_SHOP_OWNER,
+) = range(29)
 
 # ─── DATABASE ──────────────────────────────────────────────────────────────────
 def get_db():
@@ -308,6 +310,7 @@ def main_menu_kb(role: str) -> InlineKeyboardMarkup:
              InlineKeyboardButton("🎫 Promo kod", callback_data="promo_enter")],
             [InlineKeyboardButton("🎟 Ticket ochish", callback_data="ticket_open"),
              InlineKeyboardButton("🔗 Referal", callback_data="referral")],
+            [InlineKeyboardButton("💼 Ishga kirish", callback_data="job_apply")],
         ]
     if role == "shop_owner":
         buttons += [
@@ -1668,6 +1671,267 @@ async def got_work_hours(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Ish vaqti {hours} ga o'zgartirildi!", reply_markup=back_kb("my_shop"))
     return ConversationHandler.END
 
+# ─── ISHGA KIRISH (JOB APPLY) ──────────────────────────────────────────────────
+async def job_apply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏪 Do'kon egasi bo'lish", callback_data="job_shop_owner")],
+        [InlineKeyboardButton("🚴 Kuryer bo'lish", callback_data="job_courier")],
+        [InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")],
+    ])
+    await q.edit_message_text(
+        "💼 <b>Ishga kirish</b>\n\n"
+        "Qaysi lavozimga ariza topshirmoqchisiz?\n\n"
+        "🏪 <b>Do'kon egasi</b> — o'z do'koningizni oching, mahsulot soting\n"
+        "🚴 <b>Kuryer</b> — buyurtmalarni yetkazing va daromad toping",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+async def job_shop_owner_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    existing = conn.execute("SELECT id FROM shops WHERE owner_tg_id=?", (tg_id,)).fetchone()
+    conn.close()
+
+    if existing:
+        await q.edit_message_text(
+            "❗ Sizda allaqachon do'kon mavjud yoki so'rov yuborilgan.",
+            reply_markup=back_kb("job_apply")
+        )
+        return ConversationHandler.END
+
+    await q.edit_message_text(
+        "🏪 <b>Do'kon egasi bo'lish uchun ariza</b>\n\n"
+        "Do'koningiz nomini kiriting:",
+        parse_mode="HTML"
+    )
+    return WAITING_JOB_SHOP_NAME
+
+async def got_job_shop_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["job_shop_name"] = update.message.text.strip()
+    await update.message.reply_text("📝 Do'kon haqida qisqacha tavsif yozing:")
+    return WAITING_JOB_SHOP_DESC
+
+async def got_job_shop_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = context.user_data.pop("job_shop_name", "")
+    desc = update.message.text.strip()
+    tg_id = update.effective_user.id
+    full_name = update.effective_user.full_name or ""
+
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO shops (owner_tg_id, name, description, status) VALUES (?, ?, ?, 'pending')",
+        (tg_id, name, desc)
+    )
+    shop_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"admin_shop_approve_{shop_id}"),
+         InlineKeyboardButton("❌ Rad etish", callback_data=f"admin_shop_reject_{shop_id}")],
+    ])
+    try:
+        await update.get_bot().send_message(
+            ADMIN_ID,
+            f"📋 <b>Yangi do'kon egasi arizasi</b>\n\n"
+            f"👤 Ariza beruvchi: {full_name} (ID: {tg_id})\n"
+            f"🏪 Do'kon nomi: {name}\n"
+            f"📝 Tavsif: {desc}",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+    except:
+        pass
+
+    await update.message.reply_text(
+        f"✅ <b>Arizangiz qabul qilindi!</b>\n\n"
+        f"🏪 Do'kon nomi: {name}\n"
+        f"⏳ Admin ko'rib chiqadi va javob beradi.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Bosh sahifa", callback_data="main_menu")]])
+    )
+    return ConversationHandler.END
+
+async def job_courier_apply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tg_id = update.effective_user.id
+    full_name = update.effective_user.full_name or ""
+
+    conn = get_db()
+    existing = conn.execute("SELECT id FROM couriers WHERE tg_id=?", (tg_id,)).fetchone()
+    conn.close()
+
+    if existing:
+        await q.edit_message_text(
+            "❗ Siz allaqachon kuryer sifatida ro'yxatdasiz.",
+            reply_markup=back_kb()
+        )
+        return
+
+    try:
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Qabul qilish", callback_data=f"admin_courier_approve_{tg_id}"),
+             InlineKeyboardButton("❌ Rad etish", callback_data=f"admin_courier_reject_{tg_id}")],
+        ])
+        await q.get_bot().send_message(
+            ADMIN_ID,
+            f"🚴 <b>Yangi kuryer arizasi</b>\n\n"
+            f"👤 Ism: {full_name}\n"
+            f"🆔 Telegram ID: {tg_id}",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+    except:
+        pass
+
+    await q.edit_message_text(
+        f"✅ <b>Kuryer arizangiz yuborildi!</b>\n\n"
+        f"⏳ Admin ko'rib chiqadi va javob beradi.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Bosh sahifa", callback_data="main_menu")]])
+    )
+
+async def admin_courier_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    courier_tg_id = int(q.data.split("_")[3])
+
+    conn = get_db()
+    user = conn.execute("SELECT full_name FROM users WHERE tg_id=?", (courier_tg_id,)).fetchone()
+    name = user["full_name"] if user else f"Kuryer {courier_tg_id}"
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO couriers (tg_id, name, is_premium) VALUES (?, ?, 0)",
+            (courier_tg_id, name)
+        )
+        conn.execute("UPDATE users SET role='courier' WHERE tg_id=?", (courier_tg_id,))
+        conn.commit()
+    except:
+        pass
+    conn.close()
+
+    await q.edit_message_text(f"✅ Kuryer {name} qabul qilindi!")
+    try:
+        await context.bot.send_message(
+            courier_tg_id,
+            "🎉 <b>Tabriklaymiz!</b>\nSiz OsonSavdo kuryeri sifatida qabul qilindingiz!\n/start bosing.",
+            parse_mode="HTML"
+        )
+    except:
+        pass
+
+async def admin_courier_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    courier_tg_id = int(q.data.split("_")[3])
+
+    await q.edit_message_text(f"❌ Kuryer arizasi rad etildi.")
+    try:
+        await context.bot.send_message(
+            courier_tg_id,
+            "❌ Afsuski, kuryer arizangiz rad etildi."
+        )
+    except:
+        pass
+
+# ─── ADMIN DO'KON QO'SHISH ─────────────────────────────────────────────────────
+async def admin_add_shop_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if update.effective_user.id != ADMIN_ID:
+        await q.answer("❌ Ruxsat yo'q!", show_alert=True)
+        return ConversationHandler.END
+    await q.edit_message_text(
+        "🏪 <b>Admin: Yangi do'kon qo'shish</b>\n\n"
+        "Do'kon egasining Telegram ID sini kiriting:",
+        parse_mode="HTML"
+    )
+    return WAITING_ADMIN_SHOP_OWNER
+
+async def got_admin_shop_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        owner_id = int(update.message.text.strip())
+        context.user_data["admin_shop_owner_id"] = owner_id
+        await update.message.reply_text("🏪 Do'kon nomini kiriting:")
+        return WAITING_ADMIN_SHOP_NAME
+    except:
+        await update.message.reply_text("❌ Telegram ID noto'g'ri. Raqam kiriting:")
+        return WAITING_ADMIN_SHOP_OWNER
+
+async def got_admin_shop_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["admin_shop_name"] = update.message.text.strip()
+    await update.message.reply_text("📝 Do'kon tavsifini kiriting:")
+    return WAITING_ADMIN_SHOP_DESC
+
+async def got_admin_shop_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    owner_id = context.user_data.pop("admin_shop_owner_id", None)
+    name = context.user_data.pop("admin_shop_name", "")
+    desc = update.message.text.strip()
+
+    if not owner_id:
+        await update.message.reply_text("❌ Xatolik. Qaytadan urining.")
+        return ConversationHandler.END
+
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO shops (owner_tg_id, name, description, status) VALUES (?, ?, ?, 'approved')",
+        (owner_id, name, desc)
+    )
+    conn.execute("INSERT OR IGNORE INTO users (tg_id, full_name, role) VALUES (?, ?, 'shop_owner')", (owner_id, name))
+    conn.execute("UPDATE users SET role='shop_owner' WHERE tg_id=?", (owner_id,))
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(
+        f"✅ Do'kon <b>{name}</b> muvaffaqiyatli qo'shildi va tasdiqlandi!",
+        parse_mode="HTML",
+        reply_markup=back_kb("admin_panel")
+    )
+    try:
+        await context.bot.send_message(
+            owner_id,
+            f"🎉 <b>Tabriklaymiz!</b>\nSizning <b>{name}</b> do'koningiz admin tomonidan qo'shildi!\n/start bosing.",
+            parse_mode="HTML"
+        )
+    except:
+        pass
+    return ConversationHandler.END
+
+async def admin_job_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    conn = get_db()
+    pending = conn.execute(
+        "SELECT s.*, u.full_name FROM shops s LEFT JOIN users u ON s.owner_tg_id=u.tg_id WHERE s.status='pending' ORDER BY s.id DESC"
+    ).fetchall()
+    conn.close()
+
+    if not pending:
+        await q.edit_message_text("📋 Kutayotgan arizalar yo'q.", reply_markup=back_kb("admin_panel"))
+        return
+
+    buttons = []
+    for s in pending:
+        buttons.append([InlineKeyboardButton(
+            f"⏳ {s['name']} — {s['full_name'] or s['owner_tg_id']}",
+            callback_data=f"admin_shop_{s['id']}"
+        )])
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")])
+
+    await q.edit_message_text(
+        "📋 <b>Ishga kirish arizalari (do'kon):</b>",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML"
+    )
+
 # ─── ADD SHOP ──────────────────────────────────────────────────────────────────
 async def add_shop_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -2071,6 +2335,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("💰 Komissiya", callback_data="admin_commission")],
         [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"),
          InlineKeyboardButton("⚙️ Sozlamalar", callback_data="admin_settings")],
+        [InlineKeyboardButton("➕ Do'kon qo'shish", callback_data="admin_add_shop"),
+         InlineKeyboardButton("📋 Ishga kirish arizalar", callback_data="admin_job_requests")],
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")],
     ])
     await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
@@ -2774,12 +3040,33 @@ def main():
         per_message=False,
     )
 
+    job_shop_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(job_shop_owner_start, pattern="^job_shop_owner$")],
+        states={
+            WAITING_JOB_SHOP_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_job_shop_name)],
+            WAITING_JOB_SHOP_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_job_shop_desc)],
+        },
+        fallbacks=[],
+        per_message=False,
+    )
+
+    admin_add_shop_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_add_shop_start, pattern="^admin_add_shop$")],
+        states={
+            WAITING_ADMIN_SHOP_OWNER: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_admin_shop_owner)],
+            WAITING_ADMIN_SHOP_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_admin_shop_name)],
+            WAITING_ADMIN_SHOP_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_admin_shop_desc)],
+        },
+        fallbacks=[],
+        per_message=False,
+    )
+
     # Add handlers
     for conv in [
         checkout_conv, payment_screenshot_conv, promo_conv, shop_conv, product_conv,
         review_conv, ticket_conv, ticket_reply_conv, courier_conv, promo_create_conv,
         commission_conv, broadcast_conv, delivery_conv, hours_conv, edit_price_conv,
-        discount_conv, operator_conv,
+        discount_conv, operator_conv, job_shop_conv, admin_add_shop_conv,
     ]:
         app.add_handler(conv)
 
@@ -2839,6 +3126,11 @@ def main():
     app.add_handler(CallbackQueryHandler(courier_orders, pattern="^courier_orders$"))
     app.add_handler(CallbackQueryHandler(courier_stats, pattern="^courier_stats$"))
     app.add_handler(CallbackQueryHandler(noop, pattern="^noop$"))
+    app.add_handler(CallbackQueryHandler(job_apply, pattern="^job_apply$"))
+    app.add_handler(CallbackQueryHandler(job_courier_apply, pattern="^job_courier$"))
+    app.add_handler(CallbackQueryHandler(admin_job_requests, pattern="^admin_job_requests$"))
+    app.add_handler(CallbackQueryHandler(admin_courier_approve, pattern=r"^admin_courier_approve_\d+$"))
+    app.add_handler(CallbackQueryHandler(admin_courier_reject, pattern=r"^admin_courier_reject_\d+$"))
 
     logger.info("🚀 OsonSavdo Bot ishga tushdi!")
     app.run_polling(drop_pending_updates=True)
