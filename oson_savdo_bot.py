@@ -3690,8 +3690,18 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_set_payment_start, pattern=r"^admin_set_payment_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_sub_settings, pattern=r"^admin_sub_\d+$"))
 
-    # Har kuni obuna tekshiruvi (soat 09:00 da)
-    app.job_queue.run_daily(check_subscriptions, time=dtime(9, 0))
+    # Har kuni obuna tekshiruvi (asyncio task sifatida)
+    async def subscription_scheduler():
+        while True:
+            await asyncio.sleep(86400)  # 24 soat
+            try:
+                class FakeContext:
+                    bot = app.bot
+                await check_subscriptions(FakeContext())
+            except Exception as e:
+                logger.error(f"Obuna tekshiruvida xato: {e}")
+
+    app.post_init = lambda application: asyncio.get_event_loop().create_task(subscription_scheduler())
 
     logger.info("🚀 OsonSavdo Bot ishga tushdi!")
     app.run_polling(drop_pending_updates=True)
