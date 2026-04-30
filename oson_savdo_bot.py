@@ -622,14 +622,65 @@ async def shop_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{rating_str} ({shop['total_reviews']} sharh)\n"
     )
 
+    # Bu do'konn telefon raqamlari
+    phones_raw = get_setting("order_phones", "")
+    phones = json.loads(phones_raw) if phones_raw else []
+    shop_phones = [p for p in phones if p.get("shop_id") == shop_id]
+
+    phone_buttons = []
+    if shop_phones:
+        phone_text = "\n📞 <b>Telefon orqali buyurtma:</b>\n"
+        for p in shop_phones:
+            phone_text += f"👤 {p['name']}: <code>{p['phone']}</code>\n"
+        phone_buttons = [[InlineKeyboardButton("📞 Telefon orqali buyurtma", callback_data=f"shop_call_{shop_id}")]]
+    else:
+        phone_text = ""
+
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📦 Mahsulotlar", callback_data=f"products_{shop_id}")],
         [InlineKeyboardButton(fav_btn, callback_data=fav_cb)],
         [InlineKeyboardButton("⭐ Reyting qo'y", callback_data=f"rate_shop_{shop_id}"),
          InlineKeyboardButton("🛒 Savat", callback_data="cart_view")],
+        *phone_buttons,
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="shops_list")],
     ])
-    await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+    await q.edit_message_text(text + phone_text, reply_markup=kb, parse_mode="HTML")
+
+# ─── MIJOZ TELEFON BUYURTMA ───────────────────────────────────────────────────
+async def shop_call_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    shop_id = int(q.data.split("_")[2])
+
+    phones_raw = get_setting("order_phones", "")
+    phones = json.loads(phones_raw) if phones_raw else []
+    shop_phones = [p for p in phones if p.get("shop_id") == shop_id]
+
+    conn = get_db()
+    shop = conn.execute("SELECT name FROM shops WHERE id=?", (shop_id,)).fetchone()
+    conn.close()
+    shop_name = shop["name"] if shop else ""
+
+    if not shop_phones:
+        await q.edit_message_text(
+            "📞 <b>Telefon orqali buyurtma</b>\n\n"
+            "⚠️ Bu do\'kon uchun telefon raqam belgilanmagan.\n"
+            "Iltimos, bot orqali buyurtma bering.",
+            parse_mode="HTML",
+            reply_markup=back_kb(f"shop_{shop_id}")
+        )
+        return
+
+    text = f"📞 <b>{shop_name} — Telefon buyurtma</b>\n\nQuyidagi raqamga qo\'ng\'iroq qiling:\n\n"
+    for p in shop_phones:
+        text += f"👤 <b>{p['name']}</b>\n📱 <code>{p['phone']}</code>\n\n"
+    text += "📋 Operator sizning buyurtmangizni qabul qilib, kuryerga uzatadi."
+
+    await q.edit_message_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=back_kb(f"shop_{shop_id}")
+    )
 
 # ─── PRODUCTS ──────────────────────────────────────────────────────────────────
 async def products_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -854,7 +905,8 @@ async def cart_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cart = get_cart(context)
     if pid not in cart:
-        await q.answer()
+        await q.answer("⚠️ Savat yangilandi, qayta oching", show_alert=True)
+        await cart_view(update, context)
         return
 
     if action == "inc":
@@ -868,6 +920,15 @@ async def cart_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     save_cart(context, cart)
     await q.answer("✅")
+
+    # Savat bo'm-bo'sh bo'lib qolsa
+    if not cart:
+        await q.edit_message_text(
+            "🛒 Savat bo'sh!\n\nDo'konlardan mahsulot qo'shing.",
+            reply_markup=back_kb("shops_list")
+        )
+        return
+
     await cart_view(update, context)
 
 async def cart_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -987,6 +1048,10 @@ async def got_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+    if q.data == "pay_bonus":
+        context.user_data["payment_method"] = "bonus"
+        await place_order(update, context, screenshot=None)
+        return
     method = "card" if q.data == "pay_card" else "cash"
     context.user_data["payment_method"] = method
 
@@ -1149,16 +1214,7 @@ async def place_order(update, context, screenshot=None):
         f"🚴 Kuryer: {'Premium ⚡' if ctype == 'premium' else 'Oddiy'}\n"
     )
 
-    # Notify admin — faqat ko'rish tugmasi
-    admin_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Buyurtmani ko'rish", callback_data=f"admin_order_{order_id}")],
-    ])
-    try:
-        await context.bot.send_message(ADMIN_ID, order_text, reply_markup=admin_kb, parse_mode="HTML")
-        if screenshot:
-            await context.bot.send_photo(ADMIN_ID, screenshot, caption=f"📸 #{1000 + order_id} to'lov cheki")
-    except:
-        pass
+    # Admin notify o'chirilgan — faqat do'kon egasiga xabar boradi
 
     # Notify shop owner — qabul/rad tugmalari bilan
     if shop:
@@ -4545,14 +4601,14 @@ def main():
     app.add_handler(CallbackQueryHandler(main_menu_cb, pattern="^main_menu$"))
     app.add_handler(CallbackQueryHandler(more_menu, pattern="^more_menu$"))
     app.add_handler(CallbackQueryHandler(shops_list, pattern="^shops_list$"))
-    app.add_handler(CallbackQueryHandler(shop_detail, pattern=r"^shop_\d+$"))
+    app.add_handler(CallbackQueryHandler(shop_detail, pattern=r"^shop_(?!call_|settings_|orders|report|confirm_|reject_|rating_)\d+$"))
     app.add_handler(CallbackQueryHandler(products_list, pattern=r"^products_\d+$"))
     app.add_handler(CallbackQueryHandler(product_detail, pattern=r"^product_\d+$"))
     app.add_handler(CallbackQueryHandler(add_to_cart, pattern=r"^add_cart_\d+$"))
     app.add_handler(CallbackQueryHandler(cart_view, pattern="^cart_view$"))
     app.add_handler(CallbackQueryHandler(cart_update, pattern=r"^cart_(inc|dec|del)_\d+$"))
     app.add_handler(CallbackQueryHandler(cart_clear, pattern="^cart_clear$"))
-    app.add_handler(CallbackQueryHandler(payment_method, pattern="^pay_(card|cash)$"))
+    app.add_handler(CallbackQueryHandler(payment_method, pattern="^pay_(card|cash|bonus)$"))
     app.add_handler(CallbackQueryHandler(my_orders, pattern="^my_orders$"))
     app.add_handler(CallbackQueryHandler(order_detail, pattern=r"^order_detail_\d+$"))
     app.add_handler(CallbackQueryHandler(reorder, pattern=r"^reorder_\d+$"))
@@ -4612,6 +4668,7 @@ def main():
     app.add_handler(CallbackQueryHandler(del_phone_cb, pattern=r"^del_phone_\d+$"))
     app.add_handler(CallbackQueryHandler(shop_del_phone_cb, pattern=r"^shop_del_phone_\d+_\d+$"))
     app.add_handler(CallbackQueryHandler(phone_order_view, pattern="^phone_order$"))
+    app.add_handler(CallbackQueryHandler(shop_call_view, pattern=r"^shop_call_\d+$"))
 
     logger.info("🚀 OsonSavdo Bot ishga tushdi!")
     app.run_polling(drop_pending_updates=True)
