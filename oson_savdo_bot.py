@@ -2002,21 +2002,46 @@ async def got_tel_order_items(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def got_tel_order_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     address = update.message.text.strip()
-    shop_id = context.user_data.pop("tel_order_shop_id", None)
-    items_text = context.user_data.pop("tel_order_items", "")
+    shop_id = context.user_data.get("tel_order_shop_id")
+    items_text = context.user_data.get("tel_order_items", "")
+
+    # Tasdiqlash sahifasini ko'rsatish (hali saqlamay)
+    context.user_data["tel_order_address"] = address
+
+    summary = (
+        f"📞 <b>Telefon buyurtma — tasdiqlang</b>\n\n"
+        f"📋 <b>Mahsulotlar:</b>\n<pre>{items_text}</pre>\n\n"
+        f"📍 <b>Manzil:</b> {address}\n"
+        f"💵 <b>To'lov:</b> Naqd\n\n"
+        f"✅ Tasdiqlaysizmi?"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"tel_confirm_{shop_id}"),
+         InlineKeyboardButton("❌ Bekor", callback_data="my_shop")],
+    ])
+    await update.message.reply_text(summary, reply_markup=kb, parse_mode="HTML")
+    return ConversationHandler.END
+
+async def tel_order_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    shop_id = int(q.data.split("_")[2])
     owner_tg_id = update.effective_user.id
 
-    conn = get_db()
-    shop = conn.execute("SELECT name FROM shops WHERE id=?", (shop_id,)).fetchone()
+    address = context.user_data.pop("tel_order_address", "")
+    items_text = context.user_data.pop("tel_order_items", "")
+    context.user_data.pop("tel_order_shop_id", None)
 
-    # Oddiy order sifatida saqlash
+    conn = get_db()
+    shop = conn.execute("SELECT * FROM shops WHERE id=?", (shop_id,)).fetchone()
+
     cur = conn.execute(
         """INSERT INTO orders (user_tg_id, shop_id, items, address, payment_method,
-           payment_status, subtotal, delivery_price, total, commission, courier_type, premium_fee)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           payment_status, subtotal, delivery_price, total, commission, courier_type, premium_fee, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (owner_tg_id, shop_id,
          json.dumps({"tel": {"name": items_text, "price": 0, "qty": 1, "shop_id": shop_id}}),
-         address, "cash", "cash", 0, 0, 0, 0, "standard", 0)
+         address, "cash", "cash", 0, 0, 0, 0, "standard", 0, "confirmed")
     )
     order_id = cur.lastrowid
     conn.commit()
@@ -2030,27 +2055,16 @@ async def got_tel_order_address(update: Update, context: ContextTypes.DEFAULT_TY
         f"💵 To'lov: Naqd\n"
     )
 
-    # Adminga xabar
-    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-    admin_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Ko'rish", callback_data=f"admin_order_{order_id}")]
-    ])
-    try:
-        await update.get_bot().send_message(
-            int(get_setting("admin_id", str(owner_tg_id))),
-            order_text, reply_markup=admin_kb, parse_mode="HTML"
-        )
-    except:
-        pass
-
-    await update.message.reply_text(
+    await q.edit_message_text(
         f"✅ <b>Telefon buyurtma #{1000 + order_id} saqlandi!</b>\n\n"
         f"{order_text}\n"
-        f"Kuryer tayinlash uchun admin tasdiqlashini kuting.",
+        f"🚴 Kuryer tayinlanmoqda...",
         parse_mode="HTML",
         reply_markup=back_kb("my_shop")
     )
-    return ConversationHandler.END
+
+    # Kuryer tayinlash (do'kon egasi o'zi tasdiqladi, admin kerak emas)
+    await assign_courier(context, order_id, "standard")
 
 async def toggle_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -4667,6 +4681,7 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_toggle_shop, pattern=r"^admin_toggle_shop_\d+$"))
     app.add_handler(CallbackQueryHandler(del_phone_cb, pattern=r"^del_phone_\d+$"))
     app.add_handler(CallbackQueryHandler(shop_del_phone_cb, pattern=r"^shop_del_phone_\d+_\d+$"))
+    app.add_handler(CallbackQueryHandler(tel_order_confirm, pattern=r"^tel_confirm_\d+$"))
     app.add_handler(CallbackQueryHandler(phone_order_view, pattern="^phone_order$"))
     app.add_handler(CallbackQueryHandler(shop_call_view, pattern=r"^shop_call_\d+$"))
 
