@@ -99,6 +99,7 @@ def init_db():
         total_spent REAL DEFAULT 0,
         rating REAL DEFAULT 0,
         bonus_balance REAL DEFAULT 0,
+        phone_number TEXT DEFAULT '',
         created_at TEXT DEFAULT (datetime('now'))
     );
 
@@ -299,6 +300,10 @@ def migrate_db():
         )""")
     except:
         pass
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN phone_number TEXT DEFAULT ''")
+    except:
+        pass
     conn.commit()
     conn.close()
 
@@ -402,53 +407,61 @@ def back_kb(callback: str = "main_menu") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Orqaga", callback_data=callback)]])
 
 # ─── /START ────────────────────────────────────────────────────────────────────
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ask_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Foydalanuvchidan telefon raqam so'rash"""
+    from telegram import KeyboardButton, ReplyKeyboardMarkup
+    kb = ReplyKeyboardMarkup(
+        [[KeyboardButton("📱 Telefon raqamni yuborish", request_contact=True)]],
+        resize_keyboard=True, one_time_keyboard=True
+    )
+    if update.message:
+        await update.message.reply_text(
+            "📱 <b>Telefon raqamingizni yuboring</b>\n\n"
+            "Tugmani bosing yoki qo'lda kiriting (+998XXXXXXXXX):",
+            reply_markup=kb, parse_mode="HTML"
+        )
+    return WAITING_PHONE_NUMBER
+
+async def got_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Telefon raqamni saqlash"""
+    if update.message.contact:
+        phone = update.message.contact.phone_number
+        if not phone.startswith("+"):
+            phone = "+" + phone
+    else:
+        phone = update.message.text.strip()
+
     tg_id = update.effective_user.id
-    username = update.effective_user.username or ""
+    conn = get_db()
+    conn.execute("UPDATE users SET phone_number=? WHERE tg_id=?", (phone, tg_id))
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(
+        "✅ Telefon raqam saqlandi!",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    # Bosh menyu chiqarish
+    await show_main_menu(update, context)
+    return ConversationHandler.END
+
+async def show_main_menu(update, context):
+    """Bosh menyuni ko'rsatish"""
+    tg_id = update.effective_user.id
     full_name = update.effective_user.full_name or ""
-
-    # Referral handling
-    args = context.args
-    if args and args[0].startswith("REF"):
-        ref_code = args[0]
-        conn = get_db()
-        referrer = conn.execute("SELECT * FROM users WHERE referral_code=?", (ref_code,)).fetchone()
-        conn.close()
-        if referrer and referrer["tg_id"] != tg_id:
-            context.user_data["referred_by"] = referrer["tg_id"]
-
-    user = get_or_create_user(tg_id, username, full_name)
-
-    if "referred_by" in context.user_data:
-        ref_by = context.user_data.pop("referred_by")
-        conn = get_db()
-        existing = conn.execute("SELECT referred_by FROM users WHERE tg_id=?", (tg_id,)).fetchone()
-        if existing and not existing["referred_by"]:
-            bonus = float(get_setting("referral_bonus", "5000"))
-            conn.execute("UPDATE users SET referred_by=? WHERE tg_id=?", (ref_by, tg_id))
-            conn.execute("UPDATE users SET bonus_balance=bonus_balance+? WHERE tg_id=?", (bonus, ref_by))
-            conn.commit()
-            try:
-                await context.bot.send_message(ref_by, f"🎉 Referal bonus! +{format_price(bonus)} hisob balansiga qo'shildi!")
-            except:
-                pass
-        conn.close()
-
     role = get_user_role(tg_id)
     platform = get_setting("platform_name", "OsonSavdo")
 
-    # Do'konlarni yuklash
     conn = get_db()
     shops = conn.execute("SELECT * FROM shops WHERE status='approved' ORDER BY rating DESC").fetchall()
     user_row = conn.execute("SELECT bonus_balance FROM users WHERE tg_id=?", (tg_id,)).fetchone()
     conn.close()
 
-    bonus = user_row["bonus_balance"] if user_row else 0
     cart = get_cart(context)
     cart_count = sum(v["qty"] for v in cart.values())
     cart_label = f"🛒 Savat ({cart_count})" if cart_count else "🛒 Savat"
 
-    if role == "customer" or role == "admin" or role == "operator":
+    if role in ("customer", "admin", "operator"):
         if not shops:
             text = (
                 f"👋 <b>{full_name}</b>, xush kelibsiz!\n"
@@ -488,6 +501,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
     else:
         await update.callback_query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
+    username = update.effective_user.username or ""
+    full_name = update.effective_user.full_name or ""
+
+    # Referral handling
+    args = context.args
+    if args and args[0].startswith("REF"):
+        ref_code = args[0]
+        conn = get_db()
+        referrer = conn.execute("SELECT * FROM users WHERE referral_code=?", (ref_code,)).fetchone()
+        conn.close()
+        if referrer and referrer["tg_id"] != tg_id:
+            context.user_data["referred_by"] = referrer["tg_id"]
+
+    user = get_or_create_user(tg_id, username, full_name)
+
+    # Telefon raqam yo'q bo'lsa so'rash
+    if not user.get("phone_number"):
+        return await ask_phone(update, context)
+
+    if "referred_by" in context.user_data:
+        ref_by = context.user_data.pop("referred_by")
+        conn = get_db()
+        existing = conn.execute("SELECT referred_by FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+        if existing and not existing["referred_by"]:
+            bonus = float(get_setting("referral_bonus", "5000"))
+            conn.execute("UPDATE users SET referred_by=? WHERE tg_id=?", (ref_by, tg_id))
+            conn.execute("UPDATE users SET bonus_balance=bonus_balance+? WHERE tg_id=?", (bonus, ref_by))
+            conn.commit()
+            try:
+                await context.bot.send_message(ref_by, f"🎉 Referal bonus! +{format_price(bonus)} hisob balansiga qo'shildi!")
+            except:
+                pass
+        conn.close()
+
+    await show_main_menu(update, context)
 
 # ─── SHOPS LIST ────────────────────────────────────────────────────────────────
 async def more_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1275,6 +1326,8 @@ async def order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if o["status"] == "delivered":
         buttons.append([InlineKeyboardButton("⭐ Baho berish", callback_data=f"rate_order_{order_id}")])
         buttons.append([InlineKeyboardButton("🔄 Qayta buyurtma", callback_data=f"reorder_{order_id}")])
+    if o["status"] in ("new", "confirmed"):
+        buttons.append([InlineKeyboardButton("❌ Buyurtmani bekor qilish", callback_data=f"cancel_order_{order_id}")])
 
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="my_orders")])
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
@@ -1298,6 +1351,51 @@ async def reorder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(
         "✅ Mahsulotlar savatga qo'shildi!",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Savatga", callback_data="cart_view")]])
+    )
+
+async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    order_id = int(q.data.split("_")[2])
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    o = conn.execute("SELECT * FROM orders WHERE id=? AND user_tg_id=?", (order_id, tg_id)).fetchone()
+    if not o:
+        await q.answer("Buyurtma topilmadi!", show_alert=True)
+        conn.close()
+        return
+
+    if o["status"] not in ("new", "confirmed"):
+        await q.answer("Bu buyurtmani bekor qilib bo'lmaydi!", show_alert=True)
+        conn.close()
+        return
+
+    conn.execute(
+        "UPDATE orders SET status='cancelled', updated_at=? WHERE id=?",
+        (datetime.now().isoformat(), order_id)
+    )
+    conn.commit()
+
+    # Do'kon egasiga xabar
+    shop = conn.execute("SELECT owner_tg_id, name FROM shops WHERE id=?", (o["shop_id"],)).fetchone()
+    conn.close()
+
+    if shop:
+        try:
+            await context.bot.send_message(
+                shop["owner_tg_id"],
+                f"❌ <b>Buyurtma #{1000 + order_id} bekor qilindi</b>\n"
+                f"👤 Mijoz buyurtmani bekor qildi.",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+
+    await q.edit_message_text(
+        f"❌ <b>Buyurtma #{1000 + order_id} bekor qilindi.</b>",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📦 Buyurtmalarim", callback_data="my_orders")]]),
+        parse_mode="HTML"
     )
 
 # ─── ADMIN ORDER CONFIRM/REJECT ────────────────────────────────────────────────
@@ -4100,6 +4198,19 @@ def main():
             await update.callback_query.answer()
         return ConversationHandler.END
 
+    phone_conv = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            WAITING_PHONE_NUMBER: [
+                MessageHandler(filters.CONTACT, got_phone_number),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, got_phone_number),
+            ],
+        },
+        fallbacks=[CommandHandler("start", start)],
+        per_message=False,
+        allow_reentry=True,
+    )
+
     checkout_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(checkout, pattern="^checkout$")],
         states={WAITING_ADDRESS: [
@@ -4295,6 +4406,7 @@ def main():
 
     # Add handlers
     for conv in [
+        phone_conv,
         admin_add_shop_conv,
         checkout_conv, payment_screenshot_conv, promo_conv, shop_conv, product_conv,
         review_conv, ticket_conv, ticket_reply_conv, courier_conv, promo_create_conv,
@@ -4312,8 +4424,6 @@ def main():
     )
     app.add_handler(sub_conv)
 
-    app.add_handler(CommandHandler("start", start))
-
     # Callback handlers
     app.add_handler(CallbackQueryHandler(main_menu_cb, pattern="^main_menu$"))
     app.add_handler(CallbackQueryHandler(more_menu, pattern="^more_menu$"))
@@ -4330,6 +4440,7 @@ def main():
     app.add_handler(CallbackQueryHandler(my_orders, pattern="^my_orders$"))
     app.add_handler(CallbackQueryHandler(order_detail, pattern=r"^order_detail_\d+$"))
     app.add_handler(CallbackQueryHandler(reorder, pattern=r"^reorder_\d+$"))
+    app.add_handler(CallbackQueryHandler(cancel_order, pattern=r"^cancel_order_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_confirm_order, pattern=r"^admin_confirm_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_reject_order, pattern=r"^admin_reject_\d+$"))
     app.add_handler(CallbackQueryHandler(shop_confirm_order, pattern=r"^shop_confirm_\d+$"))
@@ -4388,4 +4499,4 @@ def main():
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    main()
+    main()s
