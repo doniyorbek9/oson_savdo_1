@@ -4336,9 +4336,51 @@ async def noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    # start funksiyasini qayta ishlatamiz
-    update.message = None
-    await start(update, context)
+    tg_id = update.effective_user.id
+    role = get_user_role(tg_id)
+    platform = get_setting("platform_name", "OsonSavdo")
+
+    conn = get_db()
+    shops = conn.execute("SELECT * FROM shops WHERE status='approved' ORDER BY rating DESC").fetchall()
+    conn.close()
+
+    cart = get_cart(context)
+    cart_count = sum(v["qty"] for v in cart.values())
+    cart_label = f"🛒 Savat ({cart_count})" if cart_count else "🛒 Savat"
+
+    if role in ("customer", "admin", "operator"):
+        if not shops:
+            text = f"🛍 <b>{platform}</b>\n\n🏪 Hozircha do'konlar yo'q."
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(cart_label, callback_data="cart_view")],
+                [InlineKeyboardButton("☰ Ko'proq", callback_data="more_menu")],
+            ])
+        else:
+            text = f"🛍 <b>{platform}</b> — Do'konlar\n\n"
+            buttons = []
+            for s in shops:
+                is_open = s["is_open"] if "is_open" in s.keys() else 1
+                status_icon = "🟢" if is_open else "🔴"
+                rating = f"⭐{s['rating']:.1f}" if s["rating"] else "⭐"
+                buttons.append([InlineKeyboardButton(
+                    f"{status_icon} {s['name']} {rating} | 🚚{format_price(s['delivery_price'])}",
+                    callback_data=f"shop_{s['id']}"
+                )])
+            buttons.append([
+                InlineKeyboardButton(cart_label, callback_data="cart_view"),
+                InlineKeyboardButton("☰ Ko'proq", callback_data="more_menu"),
+            ])
+            kb = InlineKeyboardMarkup(buttons)
+    else:
+        role_names = {"shop_owner": "Do'kon egasi", "courier": "Kuryer", "admin": "Admin", "operator": "Operator"}
+        text = (
+            f"👋 <b>{q.from_user.full_name}</b>!\n"
+            f"🛍 <b>{platform}</b>\n\n"
+            f"👤 Rolingiz: <b>{role_names.get(role, role)}</b>"
+        )
+        kb = main_menu_kb(role)
+
+    await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
 
 # ─── APPLICATION ───────────────────────────────────────────────────────────────
 def main():
