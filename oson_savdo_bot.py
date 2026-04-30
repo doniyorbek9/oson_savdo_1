@@ -23,7 +23,8 @@ from telegram import (
 )
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, filters, ContextTypes, ConversationHandler
+    MessageHandler, filters, ContextTypes, ConversationHandler,
+    PicklePersistence
 )
 
 try:
@@ -4371,7 +4372,8 @@ def main():
         asyncio.create_task(subscription_loop())
         asyncio.create_task(shop_hours_loop())
 
-    app = Application.builder().token(BOT_TOKEN).post_init(on_startup).build()
+    persistence = PicklePersistence(filepath="oson_savdo_persistence")
+    app = Application.builder().token(BOT_TOKEN).persistence(persistence).post_init(on_startup).build()
 
     # Conversation handlers
     checkout_conv = ConversationHandler(
@@ -4583,7 +4585,7 @@ def main():
         fallbacks=[],
         per_message=False,
     )
-    app.add_handler(admin_phone_conv)
+    app.add_handler(admin_phone_conv, group=2)
 
     # Do'kon egasi telefon raqam qo'shish
     shop_phone_conv = ConversationHandler(
@@ -4595,7 +4597,7 @@ def main():
         fallbacks=[],
         per_message=False,
     )
-    app.add_handler(shop_phone_conv)
+    app.add_handler(shop_phone_conv, group=3)
 
     # Do'kon egasi telefon orqali buyurtma kiritish
     tel_order_conv = ConversationHandler(
