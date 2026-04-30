@@ -1155,17 +1155,6 @@ async def place_order(update, context, screenshot=None):
         f"🚴 Kuryer: {'Premium ⚡' if ctype == 'premium' else 'Oddiy'}\n"
     )
 
-    # Notify admin — faqat ko'rish tugmasi
-    admin_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Buyurtmani ko'rish", callback_data=f"admin_order_{order_id}")],
-    ])
-    try:
-        await context.bot.send_message(ADMIN_ID, order_text, reply_markup=admin_kb, parse_mode="HTML")
-        if screenshot:
-            await context.bot.send_photo(ADMIN_ID, screenshot, caption=f"📸 #{1000 + order_id} to'lov cheki")
-    except:
-        pass
-
     # Notify shop owner — qabul/rad tugmalari bilan
     if shop:
         try:
