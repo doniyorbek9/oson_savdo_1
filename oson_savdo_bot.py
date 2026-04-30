@@ -2034,14 +2034,32 @@ async def shop_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if shop and shop["card_number"]:
         card_info = f"\n\n💳 Joriy karta: <b>{shop['card_number']}</b>\n👤 Ism: <b>{shop['card_holder'] or 'Kiritilmagan'}</b>"
 
+    # Bu do'konga tegishli telefon raqamlar
+    phones_raw = get_setting("order_phones", "")
+    phones = json.loads(phones_raw) if phones_raw else []
+    shop_phones = [(i, p) for i, p in enumerate(phones) if p.get("shop_id") == shop_id]
+
+    phone_info = ""
+    phone_del_buttons = []
+    if shop_phones:
+        phone_info = "\n\n📞 <b>Telefon raqamlar:</b>\n"
+        for local_idx, (_, p) in enumerate(shop_phones):
+            phone_info += f"👤 {p['name']}: <code>{p['phone']}</code>\n"
+            phone_del_buttons.append([InlineKeyboardButton(
+                f"🗑 O'chirish: {p['name']} ({p['phone']})",
+                callback_data=f"shop_del_phone_{shop_id}_{local_idx}"
+            )])
+
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💰 Yetkazish narxi", callback_data=f"set_delivery_{shop_id}"),
          InlineKeyboardButton("⏰ Ish vaqti", callback_data=f"set_hours_{shop_id}")],
         [InlineKeyboardButton("💳 To'lov tizimini tahrirlash", callback_data=f"set_payment_{shop_id}")],
+        [InlineKeyboardButton("📞 Telefon raqam qo'shish", callback_data=f"shop_phone_{shop_id}")],
+        *phone_del_buttons,
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="my_shop")],
     ])
     await q.edit_message_text(
-        f"⚙️ Do'kon sozlamalari:{card_info}",
+        f"⚙️ Do'kon sozlamalari:{card_info}{phone_info}",
         reply_markup=kb,
         parse_mode="HTML"
     )
@@ -2219,6 +2237,192 @@ async def got_card_holder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=back_kb(f"shop_settings_{shop_id}")
     )
     return ConversationHandler.END
+# ─── ADMIN TELEFON RAQAM BOSHQARUVI ───────────────────────────────────────────
+async def add_phone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tg_id = update.effective_user.id
+    if tg_id != ADMIN_ID:
+        await q.answer("❌ Ruxsat yo'q!", show_alert=True)
+        return ConversationHandler.END
+
+    await q.edit_message_text(
+        "📞 <b>Yangi telefon raqam qo'shish</b>\n\n"
+        "<b>1-qadam:</b> Ism yoki lavozimni kiriting:\n"
+        "<i>Masalan: Operator Sherzod</i>",
+        parse_mode="HTML",
+        reply_markup=back_kb("admin_settings")
+    )
+    return WAITING_PHONE_NAME
+
+async def got_admin_phone_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = update.message.text.strip()
+    if len(name) < 2:
+        await update.message.reply_text("❌ Ism juda qisqa, qaytadan kiriting:")
+        return WAITING_PHONE_NAME
+    context.user_data["new_phone_name"] = name
+    await update.message.reply_text(
+        f"✅ Ism: <b>{name}</b>\n\n"
+        f"<b>2-qadam:</b> Telefon raqamni kiriting:\n"
+        f"<i>Masalan: +998901234567</i>",
+        parse_mode="HTML"
+    )
+    return WAITING_PHONE_NUMBER
+
+async def got_admin_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    phone = update.message.text.strip()
+    if not phone.startswith("+") or len(phone) < 9:
+        await update.message.reply_text(
+            "❌ Noto'g'ri format. Masalan: <code>+998901234567</code>",
+            parse_mode="HTML"
+        )
+        return WAITING_PHONE_NUMBER
+
+    name = context.user_data.pop("new_phone_name", "")
+    phones_raw = get_setting("order_phones", "")
+    phones = json.loads(phones_raw) if phones_raw else []
+    phones.append({"name": name, "phone": phone})
+    set_setting("order_phones", json.dumps(phones, ensure_ascii=False))
+
+    await update.message.reply_text(
+        f"✅ <b>Telefon raqam qo'shildi!</b>\n\n"
+        f"👤 Ism: <b>{name}</b>\n"
+        f"📱 Raqam: <code>{phone}</code>",
+        parse_mode="HTML",
+        reply_markup=back_kb("admin_settings")
+    )
+    return ConversationHandler.END
+
+async def del_phone_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tg_id = update.effective_user.id
+    if tg_id != ADMIN_ID:
+        await q.answer("❌ Ruxsat yo'q!", show_alert=True)
+        return
+
+    idx = int(q.data.split("_")[2])
+    phones_raw = get_setting("order_phones", "")
+    phones = json.loads(phones_raw) if phones_raw else []
+
+    if 0 <= idx < len(phones):
+        removed = phones.pop(idx)
+        set_setting("order_phones", json.dumps(phones, ensure_ascii=False))
+        await q.answer(f"✅ {removed['name']} o'chirildi!", show_alert=True)
+    else:
+        await q.answer("❌ Topilmadi!", show_alert=True)
+
+    # Sahifani yangilash
+    await admin_settings(update, context)
+
+# ─── DO'KON EGASI TELEFON RAQAM BOSHQARUVI ────────────────────────────────────
+async def shop_phone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    shop_id = int(q.data.split("_")[2])
+    context.user_data["shop_phone_shop_id"] = shop_id
+
+    phones_raw = get_setting("order_phones", "")
+    phones = json.loads(phones_raw) if phones_raw else []
+
+    conn = get_db()
+    shop = conn.execute("SELECT name FROM shops WHERE id=?", (shop_id,)).fetchone()
+    conn.close()
+    shop_name = shop["name"] if shop else ""
+
+    # Bu do'konga tegishli raqamlar
+    my_phones = [p for p in phones if p.get("shop_id") == shop_id]
+    my_phones_text = ""
+    if my_phones:
+        my_phones_text = "\n\n📞 <b>Joriy raqamlaringiz:</b>\n"
+        for p in my_phones:
+            my_phones_text += f"👤 {p['name']}: <code>{p['phone']}</code>\n"
+
+    await q.edit_message_text(
+        f"📞 <b>Telefon raqam qo'shish</b>{my_phones_text}\n\n"
+        f"<b>1-qadam:</b> Mas'ul shaxs ismini kiriting:\n"
+        f"<i>Masalan: Operator Sherzod</i>",
+        parse_mode="HTML",
+        reply_markup=back_kb(f"shop_settings_{shop_id}")
+    )
+    return WAITING_PHONE_NAME
+
+async def got_shop_phone_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = update.message.text.strip()
+    if len(name) < 2:
+        await update.message.reply_text("❌ Ism juda qisqa, qaytadan kiriting:")
+        return WAITING_PHONE_NAME
+    context.user_data["new_shop_phone_name"] = name
+    await update.message.reply_text(
+        f"✅ Ism: <b>{name}</b>\n\n"
+        f"<b>2-qadam:</b> Telefon raqamni kiriting:\n"
+        f"<i>Masalan: +998901234567</i>",
+        parse_mode="HTML"
+    )
+    return WAITING_PHONE_NUMBER
+
+async def got_shop_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    phone = update.message.text.strip()
+    if not phone.startswith("+") or len(phone) < 9:
+        await update.message.reply_text(
+            "❌ Noto'g'ri format. Masalan: <code>+998901234567</code>",
+            parse_mode="HTML"
+        )
+        return WAITING_PHONE_NUMBER
+
+    name = context.user_data.pop("new_shop_phone_name", "")
+    shop_id = context.user_data.pop("shop_phone_shop_id", None)
+
+    conn = get_db()
+    shop = conn.execute("SELECT name FROM shops WHERE id=?", (shop_id,)).fetchone()
+    conn.close()
+    shop_name = shop["name"] if shop else ""
+
+    phones_raw = get_setting("order_phones", "")
+    phones = json.loads(phones_raw) if phones_raw else []
+    phones.append({"name": name, "phone": phone, "shop_id": shop_id, "shop_name": shop_name})
+    set_setting("order_phones", json.dumps(phones, ensure_ascii=False))
+
+    await update.message.reply_text(
+        f"✅ <b>Telefon raqam qo'shildi!</b>\n\n"
+        f"👤 Ism: <b>{name}</b>\n"
+        f"📱 Raqam: <code>{phone}</code>\n"
+        f"🏪 Do'kon: <b>{shop_name}</b>\n\n"
+        f"Endi mijozlar 'Telefon orqali buyurtma' bo'limida shu raqamni ko'radi.",
+        parse_mode="HTML",
+        reply_markup=back_kb(f"shop_settings_{shop_id}")
+    )
+    return ConversationHandler.END
+
+async def shop_del_phone_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    # shop_del_phone_{shop_id}_{idx}
+    parts = q.data.split("_")
+    shop_id = int(parts[3])
+    idx = int(parts[4])
+
+    phones_raw = get_setting("order_phones", "")
+    phones = json.loads(phones_raw) if phones_raw else []
+
+    # Faqat shu do'konga tegishli raqamlar indeksi
+    shop_phones_idx = [i for i, p in enumerate(phones) if p.get("shop_id") == shop_id]
+
+    if 0 <= idx < len(shop_phones_idx):
+        real_idx = shop_phones_idx[idx]
+        removed = phones.pop(real_idx)
+        set_setting("order_phones", json.dumps(phones, ensure_ascii=False))
+        await q.answer(f"✅ {removed['name']} o'chirildi!", show_alert=True)
+    else:
+        await q.answer("❌ Topilmadi!", show_alert=True)
+        return
+
+    # shop_settings sahifasiga qaytish
+    context_data_backup = q.data
+    q.data = f"shop_settings_{shop_id}"
+    await shop_settings(update, context)
+    q.data = context_data_backup
+
 async def job_apply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -4299,6 +4503,42 @@ def main():
     )
     app.add_handler(sub_conv)
 
+    # Admin telefon raqam qo'shish
+    admin_phone_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(add_phone_start, pattern="^add_phone$")],
+        states={
+            WAITING_PHONE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_admin_phone_name)],
+            WAITING_PHONE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_admin_phone_number)],
+        },
+        fallbacks=[],
+        per_message=False,
+    )
+    app.add_handler(admin_phone_conv)
+
+    # Do'kon egasi telefon raqam qo'shish
+    shop_phone_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(shop_phone_start, pattern=r"^shop_phone_\d+$")],
+        states={
+            WAITING_PHONE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_shop_phone_name)],
+            WAITING_PHONE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_shop_phone_number)],
+        },
+        fallbacks=[],
+        per_message=False,
+    )
+    app.add_handler(shop_phone_conv)
+
+    # Do'kon egasi telefon orqali buyurtma kiritish
+    tel_order_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(tel_order_new, pattern=r"^tel_order_new_\d+$")],
+        states={
+            WAITING_TEL_ORDER_ITEMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_tel_order_items)],
+            WAITING_TEL_ORDER_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_tel_order_address)],
+        },
+        fallbacks=[],
+        per_message=False,
+    )
+    app.add_handler(tel_order_conv)
+
     app.add_handler(CommandHandler("start", start))
 
     # Callback handlers
@@ -4369,6 +4609,9 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_sub_settings, pattern=r"^admin_sub_\d+$"))
     app.add_handler(CallbackQueryHandler(toggle_shop, pattern=r"^toggle_shop_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_toggle_shop, pattern=r"^admin_toggle_shop_\d+$"))
+    app.add_handler(CallbackQueryHandler(del_phone_cb, pattern=r"^del_phone_\d+$"))
+    app.add_handler(CallbackQueryHandler(shop_del_phone_cb, pattern=r"^shop_del_phone_\d+_\d+$"))
+    app.add_handler(CallbackQueryHandler(phone_order_view, pattern="^phone_order$"))
 
     logger.info("🚀 OsonSavdo Bot ishga tushdi!")
     app.run_polling(drop_pending_updates=True)
