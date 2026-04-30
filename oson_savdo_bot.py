@@ -4095,18 +4095,36 @@ def main():
     app = Application.builder().token(BOT_TOKEN).post_init(on_startup).build()
 
     # Conversation handlers
+    async def cancel_conv(update, context):
+        if update.callback_query:
+            await update.callback_query.answer()
+        return ConversationHandler.END
+
     checkout_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(checkout, pattern="^checkout$")],
-        states={WAITING_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_address)]},
-        fallbacks=[],
+        states={WAITING_ADDRESS: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, got_address),
+            CallbackQueryHandler(cancel_conv, pattern="^cart_view$"),
+        ]},
+        fallbacks=[
+            CallbackQueryHandler(cancel_conv, pattern="^cart_view$"),
+            CallbackQueryHandler(cancel_conv, pattern="^main_menu$"),
+            CallbackQueryHandler(cancel_conv, pattern="^shops_list$"),
+            CallbackQueryHandler(cancel_conv, pattern="^checkout$"),
+        ],
         per_message=False,
+        allow_reentry=True,
     )
 
     payment_screenshot_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(courier_type_select, pattern="^courier_(standard|premium)$")],
         states={WAITING_PAYMENT_SCREENSHOT: [MessageHandler(filters.PHOTO | filters.Document.ALL, got_payment_screenshot)]},
-        fallbacks=[],
+        fallbacks=[
+            CallbackQueryHandler(cancel_conv, pattern="^cart_view$"),
+            CallbackQueryHandler(cancel_conv, pattern="^main_menu$"),
+        ],
         per_message=False,
+        allow_reentry=True,
     )
 
     promo_conv = ConversationHandler(
