@@ -406,6 +406,16 @@ def main_menu_kb(role: str) -> InlineKeyboardMarkup:
 def back_kb(callback: str = "main_menu") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Orqaga", callback_data=callback)]])
 
+async def safe_edit(q, text, reply_markup=None, parse_mode="HTML"):
+    """Xavfsiz xabar tahrirlash - xato bo'lsa yangi xabar yuboradi"""
+    try:
+        await safe_edit(q, text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception:
+        try:
+            await q.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        except Exception:
+            pass
+
 # ─── /START ────────────────────────────────────────────────────────────────────
 async def ask_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Foydalanuvchidan telefon raqam so'rash"""
@@ -499,8 +509,11 @@ async def show_main_menu(update, context):
 
     if update.message:
         await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
-    else:
-        await update.callback_query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+    elif update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            await update.callback_query.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
@@ -569,7 +582,7 @@ async def more_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons.append([InlineKeyboardButton("🎙 Operator Panel", callback_data="operator_panel")])
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")])
 
-    await q.edit_message_text(
+    await safe_edit(q, 
         "☰ <b>Qo'shimcha imkoniyatlar</b>",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML"
@@ -584,7 +597,7 @@ async def phone_order_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phones = json.loads(phones_raw) if phones_raw else []
 
     if not phones:
-        await q.edit_message_text(
+        await safe_edit(q, 
             "📞 <b>Telefon orqali buyurtma</b>\n\n"
             "⚠️ Hozircha telefon raqam belgilanmagan.\n"
             "Iltimos, bot orqali buyurtma bering.",
@@ -603,7 +616,7 @@ async def phone_order_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text += "📋 Do'kon egasi sizning buyurtmangizni qabul qilib, kuryerga uzatadi."
 
-    await q.edit_message_text(
+    await safe_edit(q, 
         text,
         parse_mode="HTML",
         reply_markup=back_kb("more_menu")
@@ -620,7 +633,7 @@ async def shops_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not shops:
-        await q.edit_message_text(
+        await safe_edit(q, 
             "🏪 Hozircha do'konlar yo'q.\nKo'proq vaqt o'tgach qaytib keling!",
             reply_markup=back_kb()
         )
@@ -637,7 +650,7 @@ async def shops_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )])
 
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")])
-    await q.edit_message_text(
+    await safe_edit(q, 
         "🏪 <b>Do'konlar ro'yxati</b>\n\nBiror do'konni tanlang:",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML"
@@ -653,7 +666,7 @@ async def shop_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not shop:
-        await q.edit_message_text("Do'kon topilmadi.", reply_markup=back_kb("shops_list"))
+        await safe_edit(q, "Do'kon topilmadi.", reply_markup=back_kb("shops_list"))
         return
 
     context.user_data["current_shop"] = shop_id
@@ -686,7 +699,7 @@ async def shop_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("🛒 Savat", callback_data="cart_view")],
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="shops_list")],
     ])
-    await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+    await safe_edit(q, text, reply_markup=kb, parse_mode="HTML")
 
 # ─── PRODUCTS ──────────────────────────────────────────────────────────────────
 async def products_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -702,7 +715,7 @@ async def products_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not products:
-        await q.edit_message_text(
+        await safe_edit(q, 
             "📦 Bu do'konda mahsulotlar yo'q.",
             reply_markup=back_kb(f"shop_{shop_id}")
         )
@@ -730,7 +743,7 @@ async def products_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
 
     status = "🟢 Ochiq" if is_open else "🔴 Yopiq"
-    await q.edit_message_text(
+    await safe_edit(q, 
         f"📦 <b>{shop['name'] if shop else ''}</b> — mahsulotlar\n"
         f"{status}\n\n"
         f"<i>Mahsulotga bosing — savatga tushadi!</i>",
@@ -778,9 +791,9 @@ async def product_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await q.message.delete()
         except:
-            await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+            await safe_edit(q, text, reply_markup=kb, parse_mode="HTML")
     else:
-        await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+        await safe_edit(q, text, reply_markup=kb, parse_mode="HTML")
 
 # ─── CART ──────────────────────────────────────────────────────────────────────
 def get_cart(context) -> dict:
@@ -850,7 +863,7 @@ async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
 
     try:
-        await q.edit_message_text(
+        await safe_edit(q, 
             f"📦 <b>{shop2['name'] if shop2 else ''}</b> — mahsulotlar\n"
             f"{status2}\n\n"
             f"<i>Mahsulotga bosing — savatga tushadi!</i>",
@@ -866,7 +879,7 @@ async def cart_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cart = get_cart(context)
 
     if not cart:
-        await q.edit_message_text(
+        await safe_edit(q, 
             "🛒 Savat bo'sh!\n\nDo'konlardan mahsulot qo'shing.",
             reply_markup=back_kb("shops_list")
         )
@@ -901,7 +914,7 @@ async def cart_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("✅ ZAKAZ BERISH", callback_data="checkout")],
     ]
 
-    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
+    await safe_edit(q, text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
 
 async def cart_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -933,14 +946,14 @@ async def cart_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["cart"] = {}
     context.user_data.pop("promo_discount", None)
     context.user_data.pop("promo_code", None)
-    await q.edit_message_text("🗑 Savat tozalandi.", reply_markup=back_kb("shops_list"))
+    await safe_edit(q, "🗑 Savat tozalandi.", reply_markup=back_kb("shops_list"))
 
 # ─── PROMO CODE ────────────────────────────────────────────────────────────────
 async def promo_enter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     context.user_data["state"] = WAITING_PROMO
-    await q.edit_message_text(
+    await safe_edit(q, 
         "🎫 Promo kodni kiriting:",
         reply_markup=back_kb("cart_view")
     )
@@ -1000,11 +1013,11 @@ async def checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cart = get_cart(context)
 
     if not cart:
-        await q.edit_message_text("🛒 Savat bo'sh!", reply_markup=back_kb("shops_list"))
+        await safe_edit(q, "🛒 Savat bo'sh!", reply_markup=back_kb("shops_list"))
         return
 
     context.user_data["checkout_step"] = "address"
-    await q.edit_message_text(
+    await safe_edit(q, 
         "📍 <b>Yetkazish manzilini kiriting:</b>\n\n"
         "Masalan: Toshkent sh., Chilonzor t., 5-uy, 12-xonadon",
         reply_markup=back_kb("cart_view"),
@@ -1053,7 +1066,7 @@ async def payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
 
     premium_fee = get_setting("premium_courier_fee", "15000")
-    await q.edit_message_text(
+    await safe_edit(q, 
         f"✅ To'lov: <b>{'Karta' if method == 'card' else 'Naqd'}</b>\n\n"
         f"🚴 Kuryer turini tanlang:\n"
         f"• Oddiy: Bepul\n"
@@ -1099,7 +1112,7 @@ async def courier_type_select(update: Update, context: ContextTypes.DEFAULT_TYPE
         premium_fee = float(get_setting("premium_courier_fee", "15000")) if ctype == "premium" else 0
         grand_total = total + delivery + premium_fee
 
-        await q.edit_message_text(
+        await safe_edit(q, 
             f"💳 <b>Karta orqali to'lov</b>\n\n"
             f"💰 Jami: <b>{format_price(grand_total)}</b>"
             f"{card_info_text}\n\n"
@@ -1279,7 +1292,7 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not orders:
-        await q.edit_message_text("📦 Buyurtmalar yo'q.", reply_markup=back_kb())
+        await safe_edit(q, "📦 Buyurtmalar yo'q.", reply_markup=back_kb())
         return
 
     buttons = []
@@ -1291,7 +1304,7 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )])
 
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")])
-    await q.edit_message_text(
+    await safe_edit(q, 
         "📦 <b>Buyurtmalarim (so'nggi 10)</b>",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML"
@@ -1338,7 +1351,7 @@ async def order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons.append([InlineKeyboardButton("🗑 Buyurtmani o'chirish", callback_data=f"delete_order_{order_id}")])
 
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="my_orders")])
-    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
+    await safe_edit(q, text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
 
 # ─── REORDER ───────────────────────────────────────────────────────────────────
 async def reorder(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1356,7 +1369,7 @@ async def reorder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     items = json.loads(o["items"])
     context.user_data["cart"] = items
-    await q.edit_message_text(
+    await safe_edit(q, 
         "✅ Mahsulotlar savatga qo'shildi!",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Savatga", callback_data="cart_view")]])
     )
@@ -1400,7 +1413,7 @@ async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-    await q.edit_message_text(
+    await safe_edit(q, 
         f"❌ <b>Buyurtma #{1000 + order_id} bekor qilindi.</b>",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📦 Buyurtmalarim", callback_data="my_orders")]]),
         parse_mode="HTML"
@@ -1429,7 +1442,7 @@ async def delete_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await q.edit_message_text(
+    await safe_edit(q, 
         "🗑 <b>Buyurtma o'chirildi.</b>",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📦 Buyurtmalarim", callback_data="my_orders")]]),
         parse_mode="HTML"
@@ -1449,7 +1462,7 @@ async def admin_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE
     conn.commit()
     conn.close()
 
-    await q.edit_message_text(f"✅ Buyurtma #{1000 + order_id} tasdiqlandi!")
+    await safe_edit(q, f"✅ Buyurtma #{1000 + order_id} tasdiqlandi!")
 
     # Notify customer
     try:
@@ -1477,7 +1490,7 @@ async def admin_reject_order(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn.commit()
     conn.close()
 
-    await q.edit_message_text(f"❌ Buyurtma #{1000 + order_id} rad etildi.")
+    await safe_edit(q, f"❌ Buyurtma #{1000 + order_id} rad etildi.")
 
     try:
         await context.bot.send_message(
@@ -1499,7 +1512,7 @@ async def shop_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE)
         conn.commit()
     conn.close()
 
-    await q.edit_message_text(f"✅ Buyurtma #{1000 + order_id} qabul qilindi!")
+    await safe_edit(q, f"✅ Buyurtma #{1000 + order_id} qabul qilindi!")
 
     try:
         await context.bot.send_message(
@@ -1522,7 +1535,7 @@ async def shop_reject_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await q.edit_message_text(f"❌ Buyurtma #{1000 + order_id} rad etildi.")
+    await safe_edit(q, f"❌ Buyurtma #{1000 + order_id} rad etildi.")
 
     if o:
         try:
@@ -1615,7 +1628,7 @@ async def courier_accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await q.edit_message_text(f"✅ Buyurtma #{1000 + order_id} qabul qilindi!\n🚴 Yetkazishni boshlang.")
+    await safe_edit(q, f"✅ Buyurtma #{1000 + order_id} qabul qilindi!\n🚴 Yetkazishni boshlang.")
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🏁 Yetkazildi", callback_data=f"courier_delivered_{order_id}")],
@@ -1644,7 +1657,7 @@ async def courier_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await q.edit_message_text(f"❌ Buyurtma #{1000 + order_id} rad etildi.")
+    await safe_edit(q, f"❌ Buyurtma #{1000 + order_id} rad etildi.")
 
     # Reassign
     ctype = o["courier_type"] if o else "standard"
@@ -1666,7 +1679,7 @@ async def courier_delivered(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await q.edit_message_text(f"🏁 Buyurtma #{1000 + order_id} yetkazildi! Rahmat!")
+    await safe_edit(q, f"🏁 Buyurtma #{1000 + order_id} yetkazildi! Rahmat!")
 
     if o:
         try:
@@ -1704,7 +1717,7 @@ async def profile_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not user:
-        await q.edit_message_text("Profil topilmadi.", reply_markup=back_kb())
+        await safe_edit(q, "Profil topilmadi.", reply_markup=back_kb())
         return
 
     ref_link = f"https://t.me/OsonSavdoBot?start={user['referral_code']}"
@@ -1723,7 +1736,7 @@ async def profile_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")],
     ])
-    await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+    await safe_edit(q, text, reply_markup=kb, parse_mode="HTML")
 
 # ─── FAVORITES ─────────────────────────────────────────────────────────────────
 async def favorites_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1739,12 +1752,12 @@ async def favorites_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not favs:
-        await q.edit_message_text("❤️ Sevimli do'konlar yo'q.", reply_markup=back_kb())
+        await safe_edit(q, "❤️ Sevimli do'konlar yo'q.", reply_markup=back_kb())
         return
 
     buttons = [[InlineKeyboardButton(f"🏪 {s['name']}", callback_data=f"shop_{s['id']}")] for s in favs]
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")])
-    await q.edit_message_text("❤️ <b>Sevimli do'konlar</b>", reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
+    await safe_edit(q, "❤️ <b>Sevimli do'konlar</b>", reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
 
 async def add_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1784,7 +1797,7 @@ async def rate_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton(f"⭐ {i}", callback_data=f"give_rating_{order_id}_{i}")
         for i in range(1, 6)
     ]])
-    await q.edit_message_text("⭐ Xizmatni baholang (1-5):", reply_markup=kb)
+    await safe_edit(q, "⭐ Xizmatni baholang (1-5):", reply_markup=kb)
 
 async def give_rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1794,7 +1807,7 @@ async def give_rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rating = int(parts[3])
 
     context.user_data["pending_rating"] = {"order_id": order_id, "rating": rating}
-    await q.edit_message_text(
+    await safe_edit(q, 
         f"{'⭐' * rating} Baho: {rating}/5\n\n📝 Izoh yozing (yoki /skip):"
     )
     return WAITING_REVIEW
@@ -1854,7 +1867,7 @@ async def rate_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton(f"⭐ {i}", callback_data=f"shop_rating_{shop_id}_{i}")
         for i in range(1, 6)
     ]])
-    await q.edit_message_text("⭐ Do'konni baholang (1-5):", reply_markup=kb)
+    await safe_edit(q, "⭐ Do'konni baholang (1-5):", reply_markup=kb)
 
 async def give_shop_rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1876,7 +1889,7 @@ async def give_shop_rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await q.edit_message_text(
+    await safe_edit(q, 
         f"{'⭐' * rating} Rahmat! Bahoyingiz saqlandi.",
         reply_markup=back_kb(f"shop_{shop_id}")
     )
@@ -1885,7 +1898,7 @@ async def give_shop_rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ticket_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    await q.edit_message_text(
+    await safe_edit(q, 
         "🎟 <b>Ticket (muammo) ochish</b>\n\n"
         "Muammoni qisqacha yozing:",
         reply_markup=back_kb(),
@@ -1938,7 +1951,7 @@ async def ticket_reply_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE
     ticket_id = int(q.data.split("_")[2])
     context.user_data["replying_ticket"] = ticket_id
 
-    await q.edit_message_text(
+    await safe_edit(q, 
         f"📩 #SUP-{1000 + ticket_id} uchun javob yozing:"
     )
     return WAITING_TICKET_REPLY
@@ -1995,7 +2008,7 @@ async def referral_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Havolani do'stlarga yuboring va bonus yig'ing! 💰"
     )
 
-    await q.edit_message_text(text, reply_markup=back_kb(), parse_mode="HTML")
+    await safe_edit(q, text, reply_markup=back_kb(), parse_mode="HTML")
 
 # ─── SHOP OWNER PANEL ──────────────────────────────────────────────────────────
 async def my_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2012,7 +2025,7 @@ async def my_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("➕ Do'kon qo'shish", callback_data="add_shop")],
             [InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")],
         ])
-        await q.edit_message_text(
+        await safe_edit(q, 
             "🏪 Sizda do'kon yo'q.\nYangi do'kon qo'shing:",
             reply_markup=kb
         )
@@ -2042,7 +2055,7 @@ async def my_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📞 Telefon buyurtma kiritish", callback_data=f"tel_order_new_{shop['id']}")],
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")],
     ])
-    await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+    await safe_edit(q, text, reply_markup=kb, parse_mode="HTML")
 
 async def tel_order_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -2050,7 +2063,7 @@ async def tel_order_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     shop_id = int(q.data.split("_")[3])
     context.user_data["tel_order_shop_id"] = shop_id
 
-    await q.edit_message_text(
+    await safe_edit(q, 
         "📞 <b>Telefon orqali buyurtma kiritish</b>\n\n"
         "<b>1-qadam / 2</b>\n\n"
         "📋 Mijoz aytgan mahsulotlar va miqdorlarini yozing:\n\n"
@@ -2171,7 +2184,7 @@ async def shop_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("💳 To'lov tizimini tahrirlash", callback_data=f"set_payment_{shop_id}")],
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="my_shop")],
     ])
-    await q.edit_message_text(
+    await safe_edit(q, 
         f"⚙️ Do'kon sozlamalari:{card_info}",
         reply_markup=kb,
         parse_mode="HTML"
@@ -2182,7 +2195,7 @@ async def set_delivery_price(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await q.answer()
     shop_id = int(q.data.split("_")[2])
     context.user_data["setting_shop_id"] = shop_id
-    await q.edit_message_text("💰 Yangi yetkazish narxini kiriting (so'mda):")
+    await safe_edit(q, "💰 Yangi yetkazish narxini kiriting (so'mda):")
     return WAITING_DELIVERY_PRICE
 
 async def got_delivery_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2216,7 +2229,7 @@ async def set_work_hours(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     current = shop["work_hours"] if shop else "09:00-22:00"
 
-    await q.edit_message_text(
+    await safe_edit(q, 
         f"⏰ <b>Ish vaqtini sozlash</b>\n\n"
         f"📌 Joriy vaqt: <b>{current}</b>\n\n"
         f"Yangi ish vaqtini kiriting:\n"
@@ -2292,7 +2305,7 @@ async def set_payment_settings(update: Update, context: ContextTypes.DEFAULT_TYP
             f"👤 Ism: <b>{shop['card_holder'] or 'Kiritilmagan'}</b>"
         )
 
-    await q.edit_message_text(
+    await safe_edit(q, 
         f"💳 <b>To'lov tizimini sozlash</b>{current}\n\n"
         f"Karta raqamini kiriting (16 raqam, bo'shliqlarsiz):\n"
         f"Masalan: <code>8600123456789012</code>",
@@ -2358,7 +2371,7 @@ async def job_apply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🚴 Kuryer bo'lish", callback_data="job_courier")],
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")],
     ])
-    await q.edit_message_text(
+    await safe_edit(q, 
         "💼 <b>Ishga kirish</b>\n\n"
         "Qaysi lavozimga ariza topshirmoqchisiz?\n\n"
         "🏪 <b>Do'kon egasi</b> — o'z do'koningizni oching, mahsulot soting\n"
@@ -2377,13 +2390,13 @@ async def job_shop_owner_start(update: Update, context: ContextTypes.DEFAULT_TYP
     conn.close()
 
     if existing:
-        await q.edit_message_text(
+        await safe_edit(q, 
             "❗ Sizda allaqachon do'kon mavjud yoki so'rov yuborilgan.",
             reply_markup=back_kb("job_apply")
         )
         return ConversationHandler.END
 
-    await q.edit_message_text(
+    await safe_edit(q, 
         "🏪 <b>Do'kon egasi bo'lish uchun ariza</b>\n\n"
         "Do'koningiz nomini kiriting:",
         parse_mode="HTML"
@@ -2447,7 +2460,7 @@ async def job_courier_apply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if existing:
-        await q.edit_message_text(
+        await safe_edit(q, 
             "❗ Siz allaqachon kuryer sifatida ro'yxatdasiz.",
             reply_markup=back_kb()
         )
@@ -2469,7 +2482,7 @@ async def job_courier_apply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-    await q.edit_message_text(
+    await safe_edit(q, 
         f"✅ <b>Kuryer arizangiz yuborildi!</b>\n\n"
         f"⏳ Admin ko'rib chiqadi va javob beradi.",
         parse_mode="HTML",
@@ -2495,7 +2508,7 @@ async def admin_courier_approve(update: Update, context: ContextTypes.DEFAULT_TY
         pass
     conn.close()
 
-    await q.edit_message_text(f"✅ Kuryer {name} qabul qilindi!")
+    await safe_edit(q, f"✅ Kuryer {name} qabul qilindi!")
     try:
         await context.bot.send_message(
             courier_tg_id,
@@ -2510,7 +2523,7 @@ async def admin_courier_reject(update: Update, context: ContextTypes.DEFAULT_TYP
     await q.answer()
     courier_tg_id = int(q.data.split("_")[3])
 
-    await q.edit_message_text(f"❌ Kuryer arizasi rad etildi.")
+    await safe_edit(q, f"❌ Kuryer arizasi rad etildi.")
     try:
         await context.bot.send_message(
             courier_tg_id,
@@ -2526,7 +2539,7 @@ async def admin_add_shop_start(update: Update, context: ContextTypes.DEFAULT_TYP
     if update.effective_user.id != ADMIN_ID:
         await q.answer("❌ Ruxsat yo'q!", show_alert=True)
         return ConversationHandler.END
-    await q.edit_message_text(
+    await safe_edit(q, 
         "🏪 <b>Admin: Yangi do'kon qo'shish</b>\n\n"
         "Do'kon egasining Telegram ID sini kiriting:",
         parse_mode="HTML"
@@ -2599,7 +2612,7 @@ async def admin_job_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn.close()
 
     if not pending:
-        await q.edit_message_text("📋 Kutayotgan arizalar yo'q.", reply_markup=back_kb("admin_panel"))
+        await safe_edit(q, "📋 Kutayotgan arizalar yo'q.", reply_markup=back_kb("admin_panel"))
         return
 
     buttons = []
@@ -2610,7 +2623,7 @@ async def admin_job_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )])
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")])
 
-    await q.edit_message_text(
+    await safe_edit(q, 
         "📋 <b>Ishga kirish arizalari (do'kon):</b>",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML"
@@ -2621,7 +2634,7 @@ async def add_shop_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     context.user_data["adding_shop"] = True
-    await q.edit_message_text("🏪 Do'kon nomini kiriting:")
+    await safe_edit(q, "🏪 Do'kon nomini kiriting:")
     return WAITING_SHOP_NAME
 
 async def got_shop_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2680,11 +2693,11 @@ async def add_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not shop:
-        await q.edit_message_text("❌ Tasdiqlangan do'koningiz yo'q.", reply_markup=back_kb())
+        await safe_edit(q, "❌ Tasdiqlangan do'koningiz yo'q.", reply_markup=back_kb())
         return ConversationHandler.END
 
     context.user_data["adding_product_shop"] = shop["id"]
-    await q.edit_message_text("🛍 Mahsulot nomini kiriting:")
+    await safe_edit(q, "🛍 Mahsulot nomini kiriting:")
     return WAITING_PRODUCT_NAME
 
 async def got_product_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2746,7 +2759,7 @@ async def owner_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not products:
-        await q.edit_message_text("📦 Mahsulotlar yo'q.", reply_markup=back_kb("my_shop"))
+        await safe_edit(q, "📦 Mahsulotlar yo'q.", reply_markup=back_kb("my_shop"))
         return
 
     buttons = []
@@ -2758,7 +2771,7 @@ async def owner_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )])
 
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="my_shop")])
-    await q.edit_message_text(
+    await safe_edit(q, 
         "📦 <b>Mahsulotlaringiz:</b>",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML"
@@ -2786,7 +2799,7 @@ async def owner_product_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     ])
 
     disc_txt = f"\n🔥 Aksiya: {p['discount_percent']}%" if p["discount_percent"] else ""
-    await q.edit_message_text(
+    await safe_edit(q, 
         f"🛍 <b>{p['name']}</b>\n"
         f"💰 {format_price(p['price'])}{disc_txt}\n"
         f"📦 Ombor: {p['stock']}\n"
@@ -2800,7 +2813,7 @@ async def edit_product_price(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await q.answer()
     prod_id = int(q.data.split("_")[2])
     context.user_data["editing_prod_id"] = prod_id
-    await q.edit_message_text("💰 Yangi narxni kiriting (so'mda):")
+    await safe_edit(q, "💰 Yangi narxni kiriting (so'mda):")
     return WAITING_PRODUCT_EDIT_PRICE
 
 async def got_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2825,7 +2838,7 @@ async def set_product_discount(update: Update, context: ContextTypes.DEFAULT_TYP
     await q.answer()
     prod_id = int(q.data.split("_")[2])
     context.user_data["discounting_prod_id"] = prod_id
-    await q.edit_message_text("🔥 Chegirma foizini kiriting (0-100):")
+    await safe_edit(q, "🔥 Chegirma foizini kiriting (0-100):")
     return WAITING_PRODUCT_DISCOUNT
 
 async def got_product_discount(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2872,7 +2885,7 @@ async def shop_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = get_db()
     shop = conn.execute("SELECT id FROM shops WHERE owner_tg_id=?", (tg_id,)).fetchone()
     if not shop:
-        await q.edit_message_text("Do'kon topilmadi.", reply_markup=back_kb())
+        await safe_edit(q, "Do'kon topilmadi.", reply_markup=back_kb())
         conn.close()
         return
 
@@ -2883,7 +2896,7 @@ async def shop_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not orders:
-        await q.edit_message_text("📦 Buyurtmalar yo'q.", reply_markup=back_kb())
+        await safe_edit(q, "📦 Buyurtmalar yo'q.", reply_markup=back_kb())
         return
 
     buttons = []
@@ -2895,7 +2908,7 @@ async def shop_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )])
 
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="my_shop")])
-    await q.edit_message_text(
+    await safe_edit(q, 
         "📦 <b>Do'kon buyurtmalari</b>",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML"
@@ -2910,7 +2923,7 @@ async def shop_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = get_db()
     shop = conn.execute("SELECT * FROM shops WHERE owner_tg_id=?", (tg_id,)).fetchone()
     if not shop:
-        await q.edit_message_text("Do'kon topilmadi.", reply_markup=back_kb())
+        await safe_edit(q, "Do'kon topilmadi.", reply_markup=back_kb())
         conn.close()
         return
 
@@ -2925,7 +2938,7 @@ async def shop_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_orders = len(orders)
 
     if not EXCEL_AVAILABLE:
-        await q.edit_message_text(
+        await safe_edit(q, 
             f"📊 <b>30 kunlik hisobot</b>\n\n"
             f"📦 Buyurtmalar: {total_orders}\n"
             f"💰 Daromad: {format_price(total_revenue)}\n\n"
@@ -3023,7 +3036,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("📋 Ishga kirish arizalar", callback_data="admin_job_requests")],
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")],
     ])
-    await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+    await safe_edit(q, text, reply_markup=kb, parse_mode="HTML")
 
 async def admin_shops(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -3041,7 +3054,7 @@ async def admin_shops(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )])
 
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")])
-    await q.edit_message_text(
+    await safe_edit(q, 
         "🏪 <b>Barcha do'konlar:</b>",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML"
@@ -3101,7 +3114,7 @@ async def admin_shop_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         sub_text = "\n\n📅 <b>Obuna:</b> <i>Belgilanmagan</i>"
 
-    await q.edit_message_text(
+    await safe_edit(q, 
         f"🏪 <b>{s['name']}</b>\n"
         f"📝 {s['description']}\n"
         f"👤 Egasi ID: {s['owner_tg_id']}\n"
@@ -3125,7 +3138,7 @@ async def admin_shop_approve(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn.commit()
     conn.close()
 
-    await q.edit_message_text(f"✅ Do'kon #{shop_id} tasdiqlandi!")
+    await safe_edit(q, f"✅ Do'kon #{shop_id} tasdiqlandi!")
     if s:
         try:
             await context.bot.send_message(s["owner_tg_id"], f"🎉 Do'koningiz '{s['name']}' tasdiqlandi! /start bosing.")
@@ -3143,7 +3156,7 @@ async def admin_shop_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await q.edit_message_text(f"❌ Do'kon #{shop_id} rad etildi.")
+    await safe_edit(q, f"❌ Do'kon #{shop_id} rad etildi.")
     if s:
         try:
             await context.bot.send_message(s["owner_tg_id"], f"❌ Do'koningiz '{s['name']}' rad etildi.")
@@ -3174,7 +3187,7 @@ async def admin_shop_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     conn.close()
 
-    await q.edit_message_text(
+    await safe_edit(q, 
         f"🗑 Do'kon muvaffaqiyatli o'chirildi.",
         reply_markup=back_kb("admin_shops")
     )
@@ -3239,7 +3252,7 @@ async def admin_sub_settings(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         cur_info = "\n\n📌 Obuna hali belgilanmagan."
 
-    await q.edit_message_text(
+    await safe_edit(q, 
         f"💰 <b>'{shop['name'] if shop else ''}' obuna sozlamalari</b>{cur_info}\n\n"
         f"Har 30 kunda do'kon daromadidan olinadigan foizni kiriting (0-50):\n"
         f"Masalan: <code>10</code> (10% degani)",
@@ -3454,7 +3467,7 @@ async def admin_set_payment_start(update: Update, context: ContextTypes.DEFAULT_
             f"👤 Ism: <b>{shop['card_holder'] or 'Kiritilmagan'}</b>"
         )
 
-    await q.edit_message_text(
+    await safe_edit(q, 
         f"💳 <b>Admin: '{shop['name'] if shop else ''}' do'koni to'lov tizimi</b>{current}\n\n"
         f"Yangi karta raqamini kiriting (13-19 ta raqam):\n"
         f"Masalan: <code>8600123456789012</code>",
@@ -3519,7 +3532,7 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not users:
-        await q.edit_message_text("👥 Foydalanuvchilar yo'q.", reply_markup=back_kb("admin_panel"))
+        await safe_edit(q, "👥 Foydalanuvchilar yo'q.", reply_markup=back_kb("admin_panel"))
         return
 
     buttons = []
@@ -3532,7 +3545,7 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )])
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")])
 
-    await q.edit_message_text(
+    await safe_edit(q, 
         "👥 <b>Foydalanuvchilar (so'nggi 20):</b>",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML"
@@ -3579,7 +3592,7 @@ async def admin_user_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_users")]
     ])
-    await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+    await safe_edit(q, text, reply_markup=kb, parse_mode="HTML")
 
 async def admin_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -3600,7 +3613,7 @@ async def admin_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )])
 
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")])
-    await q.edit_message_text(
+    await safe_edit(q, 
         "📦 <b>Barcha buyurtmalar:</b>",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML"
@@ -3641,7 +3654,7 @@ async def admin_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ])
 
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_orders")])
-    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
+    await safe_edit(q, text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
 
 # ─── ADMIN COURIERS ────────────────────────────────────────────────────────────
 async def admin_couriers(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3657,7 +3670,7 @@ async def admin_couriers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("➕ Kuryer qo'shish", callback_data="add_courier")],
             [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")],
         ])
-        await q.edit_message_text("🚴 Kuryerlar yo'q.", reply_markup=kb)
+        await safe_edit(q, "🚴 Kuryerlar yo'q.", reply_markup=kb)
         return
 
     buttons = []
@@ -3671,7 +3684,7 @@ async def admin_couriers(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     buttons.append([InlineKeyboardButton("➕ Kuryer qo'shish", callback_data="add_courier")])
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")])
-    await q.edit_message_text(
+    await safe_edit(q, 
         "🚴 <b>Kuryerlar:</b>",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML"
@@ -3704,7 +3717,7 @@ async def admin_courier_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton("🔥 Ishdan bo'shatish", callback_data=f"admin_courier_fire_{courier_tg_id}")],
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_couriers")],
     ])
-    await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+    await safe_edit(q, text, reply_markup=kb, parse_mode="HTML")
 
 async def admin_courier_fire(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -3719,7 +3732,7 @@ async def admin_courier_fire(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn.close()
 
     name = c["name"] if c else str(courier_tg_id)
-    await q.edit_message_text(
+    await safe_edit(q, 
         f"✅ {name} ishdan bo'shatildi.",
         reply_markup=back_kb("admin_couriers")
     )
@@ -3734,7 +3747,7 @@ async def admin_courier_fire(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def add_courier_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    await q.edit_message_text(
+    await safe_edit(q, 
         "🚴 Kuryer ma'lumotlarini kiriting:\n\nFormat: TelegramID|Ism|premium(1/0)\nMasalan: 123456|Ali|0"
     )
     return WAITING_COURIER_NAME
@@ -3785,7 +3798,7 @@ async def courier_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not orders:
-        await q.edit_message_text("📦 Buyurtmalar yo'q.", reply_markup=back_kb())
+        await safe_edit(q, "📦 Buyurtmalar yo'q.", reply_markup=back_kb())
         return
 
     buttons = []
@@ -3797,7 +3810,7 @@ async def courier_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )])
 
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")])
-    await q.edit_message_text(
+    await safe_edit(q, 
         "🚴 <b>Mening yetkazishlarim:</b>",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML"
@@ -3813,7 +3826,7 @@ async def courier_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not courier:
-        await q.edit_message_text("Kuryer topilmadi.", reply_markup=back_kb())
+        await safe_edit(q, "Kuryer topilmadi.", reply_markup=back_kb())
         return
 
     text = (
@@ -3825,7 +3838,7 @@ async def courier_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{'🔴 Band' if courier['is_busy'] else '🟢 Bo\'sh'}\n"
     )
 
-    await q.edit_message_text(text, reply_markup=back_kb(), parse_mode="HTML")
+    await safe_edit(q, text, reply_markup=back_kb(), parse_mode="HTML")
 
 # ─── PROMO CODES (ADMIN) ───────────────────────────────────────────────────────
 async def admin_promos(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3846,13 +3859,13 @@ async def admin_promos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("➕ Yangi promo", callback_data="create_promo")],
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")],
     ])
-    await q.edit_message_text(text or "Promo kodlar yo'q.", reply_markup=kb, parse_mode="HTML")
+    await safe_edit(q, text or "Promo kodlar yo'q.", reply_markup=kb, parse_mode="HTML")
 
 async def create_promo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     context.user_data.pop("new_promo", None)
-    await q.edit_message_text(
+    await safe_edit(q, 
         "🎫 <b>Yangi promo kod yaratish</b>\n\n"
         "<b>1-qadam</b> / 6\n\n"
         "✏️ Promo kod nomini kiriting:\n"
@@ -3902,7 +3915,7 @@ async def got_promo_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hint = "Masalan: <code>10000</code>  →  10 000 so'm chegirma"
         unit = "so'm"
 
-    await q.edit_message_text(
+    await safe_edit(q, 
         f"✅ Tur: <b>{label}</b>\n\n"
         f"<b>3-qadam</b> / 6\n\n"
         f"🔢 Chegirma miqdorini kiriting ({unit}):\n"
@@ -4034,7 +4047,7 @@ async def admin_commission(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     current = get_setting("commission_percent", "10")
-    await q.edit_message_text(
+    await safe_edit(q, 
         f"💰 Joriy komissiya: <b>{current}%</b>\n\nYangi foizni kiriting (0-50):",
         reply_markup=back_kb("admin_panel"),
         parse_mode="HTML"
@@ -4067,7 +4080,7 @@ async def admin_tickets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not tickets:
-        await q.edit_message_text("🎟 Ticketlar yo'q.", reply_markup=back_kb("admin_panel"))
+        await safe_edit(q, "🎟 Ticketlar yo'q.", reply_markup=back_kb("admin_panel"))
         return
 
     buttons = []
@@ -4079,7 +4092,7 @@ async def admin_tickets(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )])
 
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")])
-    await q.edit_message_text(
+    await safe_edit(q, 
         "🎟 <b>Ticketlar:</b>",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML"
@@ -4092,7 +4105,7 @@ async def admin_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
 
     if not EXCEL_AVAILABLE:
-        await q.edit_message_text("❌ openpyxl o'rnatilmagan.", reply_markup=back_kb("admin_panel"))
+        await safe_edit(q, "❌ openpyxl o'rnatilmagan.", reply_markup=back_kb("admin_panel"))
         return
 
     conn = get_db()
@@ -4134,7 +4147,7 @@ async def admin_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    await q.edit_message_text("📢 Xabarni kiriting (barcha foydalanuvchilarga yuboriladi):")
+    await safe_edit(q, "📢 Xabarni kiriting (barcha foydalanuvchilarga yuboriladi):")
     return WAITING_BROADCAST
 
 async def got_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4195,7 +4208,7 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         *phone_buttons,
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")],
     ])
-    await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+    await safe_edit(q, text, reply_markup=kb, parse_mode="HTML")
 
 # ─── OPERATOR PANEL ────────────────────────────────────────────────────────────
 async def operator_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4206,12 +4219,12 @@ async def operator_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📝 Buyurtma kiritish", callback_data="operator_new_order")],
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")],
     ])
-    await q.edit_message_text("🎙 <b>Operator Panel</b>", reply_markup=kb, parse_mode="HTML")
+    await safe_edit(q, "🎙 <b>Operator Panel</b>", reply_markup=kb, parse_mode="HTML")
 
 async def operator_new_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    await q.edit_message_text(
+    await safe_edit(q, 
         "📝 Buyurtmani matn shaklida kiriting:\n\nFormat: FoydalanuvchiID|Mahsulotlar|Manzil"
     )
     return WAITING_OPERATOR_ORDER
@@ -4248,9 +4261,7 @@ async def noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    # start funksiyasini qayta ishlatamiz
-    update.message = None
-    await start(update, context)
+    await show_main_menu(update, context)
 
 # ─── APPLICATION ───────────────────────────────────────────────────────────────
 def main():
