@@ -409,7 +409,7 @@ def back_kb(callback: str = "main_menu") -> InlineKeyboardMarkup:
 async def safe_edit(q, text, reply_markup=None, parse_mode="HTML"):
     """Xavfsiz xabar tahrirlash - xato bo'lsa yangi xabar yuboradi"""
     try:
-        await safe_edit(q, text, reply_markup=reply_markup, parse_mode=parse_mode)
+        await q.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception:
         try:
             await q.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
