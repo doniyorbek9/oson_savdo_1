@@ -61,7 +61,9 @@ logger = logging.getLogger(__name__)
     WAITING_SUB_PERCENT,
     WAITING_PROMO_CODE, WAITING_PROMO_TYPE, WAITING_PROMO_VALUE,
     WAITING_PROMO_LIMIT, WAITING_PROMO_DAYS, WAITING_PROMO_MIN_AMOUNT,
-) = range(40)
+    WAITING_PHONE_NAME, WAITING_PHONE_NUMBER,
+    WAITING_TEL_ORDER_ITEMS, WAITING_TEL_ORDER_ADDRESS,
+) = range(44)
 
 # ─── DATABASE ──────────────────────────────────────────────────────────────────
 def get_db():
@@ -249,6 +251,7 @@ def init_db():
         ("premium_courier_fee", "15000"),
         ("referral_bonus", "5000"),
         ("platform_name", "OsonSavdo"),
+        ("order_phones", ""),  # JSON list: [{"name":"Ism","phone":"+998901234567","shop_id":0}]
     ]
     for key, val in defaults:
         c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, val))
@@ -493,6 +496,7 @@ async def more_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bonus = user_row["bonus_balance"] if user_row else 0
 
     buttons = [
+        [InlineKeyboardButton("📞 Telefon orqali buyurtma", callback_data="phone_order")],
         [InlineKeyboardButton("📦 Buyurtmalarim", callback_data="my_orders"),
          InlineKeyboardButton("👤 Profil", callback_data="profile")],
         [InlineKeyboardButton("❤️ Sevimlilar", callback_data="favorites"),
@@ -512,6 +516,40 @@ async def more_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "☰ <b>Qo'shimcha imkoniyatlar</b>",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML"
+    )
+
+# ─── TELEFON ORQALI BUYURTMA (MIJOZ) ──────────────────────────────────────────
+async def phone_order_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    phones_raw = get_setting("order_phones", "")
+    phones = json.loads(phones_raw) if phones_raw else []
+
+    if not phones:
+        await q.edit_message_text(
+            "📞 <b>Telefon orqali buyurtma</b>\n\n"
+            "⚠️ Hozircha telefon raqam belgilanmagan.\n"
+            "Iltimos, bot orqali buyurtma bering.",
+            parse_mode="HTML",
+            reply_markup=back_kb("more_menu")
+        )
+        return
+
+    text = (
+        "📞 <b>Telefon orqali buyurtma</b>\n\n"
+        "Quyidagi raqamlardan biriga qo'ng'iroq qiling:\n\n"
+    )
+    for p in phones:
+        shop_name = f" ({p.get('shop_name', '')})" if p.get('shop_name') else ""
+        text += f"👤 <b>{p['name']}</b>{shop_name}\n📱 <code>{p['phone']}</code>\n\n"
+
+    text += "📋 Do'kon egasi sizning buyurtmangizni qabul qilib, kuryerga uzatadi."
+
+    await q.edit_message_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=back_kb("more_menu")
     )
 
 async def shops_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1870,9 +1908,93 @@ async def my_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("➕ Mahsulot qo'sh", callback_data="add_product")],
         [InlineKeyboardButton("⚙️ Sozlamalar", callback_data=f"shop_settings_{shop['id']}"),
          InlineKeyboardButton("📊 Hisobot", callback_data="shop_report")],
+        [InlineKeyboardButton("📞 Telefon buyurtma kiritish", callback_data=f"tel_order_new_{shop['id']}")],
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")],
     ])
     await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+
+async def tel_order_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    shop_id = int(q.data.split("_")[3])
+    context.user_data["tel_order_shop_id"] = shop_id
+
+    await q.edit_message_text(
+        "📞 <b>Telefon orqali buyurtma kiritish</b>\n\n"
+        "<b>1-qadam / 2</b>\n\n"
+        "📋 Mijoz aytgan mahsulotlar va miqdorlarini yozing:\n\n"
+        "<i>Masalan:\n"
+        "Pepsi 1L x2\n"
+        "Sut 1L x1\n"
+        "Non x3</i>",
+        parse_mode="HTML",
+        reply_markup=back_kb("my_shop")
+    )
+    return WAITING_TEL_ORDER_ITEMS
+
+async def got_tel_order_items(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    items_text = update.message.text.strip()
+    context.user_data["tel_order_items"] = items_text
+
+    await update.message.reply_text(
+        f"✅ Mahsulotlar:\n<pre>{items_text}</pre>\n\n"
+        f"<b>2-qadam / 2</b>\n\n"
+        f"📍 Yetkazish manzilini yozing:",
+        parse_mode="HTML"
+    )
+    return WAITING_TEL_ORDER_ADDRESS
+
+async def got_tel_order_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    address = update.message.text.strip()
+    shop_id = context.user_data.pop("tel_order_shop_id", None)
+    items_text = context.user_data.pop("tel_order_items", "")
+    owner_tg_id = update.effective_user.id
+
+    conn = get_db()
+    shop = conn.execute("SELECT name FROM shops WHERE id=?", (shop_id,)).fetchone()
+
+    # Oddiy order sifatida saqlash
+    cur = conn.execute(
+        """INSERT INTO orders (user_tg_id, shop_id, items, address, payment_method,
+           payment_status, subtotal, delivery_price, total, commission, courier_type, premium_fee)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (owner_tg_id, shop_id,
+         json.dumps({"tel": {"name": items_text, "price": 0, "qty": 1, "shop_id": shop_id}}),
+         address, "cash", "cash", 0, 0, 0, 0, "standard", 0)
+    )
+    order_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+
+    order_text = (
+        f"📞 <b>Telefon buyurtma #{1000 + order_id}</b>\n\n"
+        f"🏪 Do'kon: {shop['name'] if shop else ''}\n"
+        f"📋 Mahsulotlar:\n<pre>{items_text}</pre>\n"
+        f"📍 Manzil: {address}\n"
+        f"💵 To'lov: Naqd\n"
+    )
+
+    # Adminga xabar
+    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+    admin_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Ko'rish", callback_data=f"admin_order_{order_id}")]
+    ])
+    try:
+        await update.get_bot().send_message(
+            int(get_setting("admin_id", str(owner_tg_id))),
+            order_text, reply_markup=admin_kb, parse_mode="HTML"
+        )
+    except:
+        pass
+
+    await update.message.reply_text(
+        f"✅ <b>Telefon buyurtma #{1000 + order_id} saqlandi!</b>\n\n"
+        f"{order_text}\n"
+        f"Kuryer tayinlash uchun admin tasdiqlashini kuting.",
+        parse_mode="HTML",
+        reply_markup=back_kb("my_shop")
+    )
+    return ConversationHandler.END
 
 async def toggle_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -3853,16 +3975,37 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     commission = get_setting("commission_percent", "10")
     premium_fee = get_setting("premium_courier_fee", "15000")
     ref_bonus = get_setting("referral_bonus", "5000")
+    phones_raw = get_setting("order_phones", "")
+    phones = json.loads(phones_raw) if phones_raw else []
+
+    phones_text = ""
+    if phones:
+        phones_text = "\n\n📞 <b>Telefon raqamlar:</b>\n"
+        for i, p in enumerate(phones):
+            shop_n = f" ({p.get('shop_name','')})" if p.get('shop_name') else ""
+            phones_text += f"{i+1}. {p['name']}{shop_n}: <code>{p['phone']}</code>\n"
+    else:
+        phones_text = "\n\n📞 Telefon raqamlar: <i>yo'q</i>"
 
     text = (
         f"⚙️ <b>Platform sozlamalari</b>\n\n"
         f"💰 Komissiya: {commission}%\n"
-        f"⚡ Premium kuryer to'lovi: {format_price(float(premium_fee))}\n"
-        f"🔗 Referal bonus: {format_price(float(ref_bonus))}\n"
+        f"⚡ Premium kuryer: {format_price(float(premium_fee))}\n"
+        f"🔗 Referal bonus: {format_price(float(ref_bonus))}"
+        f"{phones_text}"
     )
 
+    phone_buttons = []
+    for i, p in enumerate(phones):
+        phone_buttons.append([InlineKeyboardButton(
+            f"🗑 {p['name']}: {p['phone']}",
+            callback_data=f"del_phone_{i}"
+        )])
+
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💰 Komissiya o'zgartiris", callback_data="admin_commission")],
+        [InlineKeyboardButton("💰 Komissiya o'zgartirish", callback_data="admin_commission")],
+        [InlineKeyboardButton("➕ Telefon raqam qo'shish", callback_data="add_phone")],
+        *phone_buttons,
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")],
     ])
     await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
