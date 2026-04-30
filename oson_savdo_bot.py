@@ -428,25 +428,92 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role = get_user_role(tg_id)
     platform = get_setting("platform_name", "OsonSavdo")
 
-    role_labels = {
-        "customer": "Mijoz", "shop_owner": "Do'kon egasi",
-        "courier": "Kuryer", "admin": "Admin", "operator": "Operator"
-    }
+    # Do'konlarni yuklash
+    conn = get_db()
+    shops = conn.execute("SELECT * FROM shops WHERE status='approved' ORDER BY rating DESC").fetchall()
+    user_row = conn.execute("SELECT bonus_balance FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+    conn.close()
 
-    text = (
-        f"👋 Xush kelibsiz, <b>{full_name}</b>!\n"
-        f"🛍 <b>{platform}</b> — Online Marketplace\n\n"
-        f"👤 Rolingiz: <b>{role_labels.get(role, role)}</b>\n"
-        f"─────────────────────"
-    )
+    bonus = user_row["bonus_balance"] if user_row else 0
+    cart = get_cart(context)
+    cart_count = sum(v["qty"] for v in cart.values())
+    cart_label = f"🛒 Savat ({cart_count})" if cart_count else "🛒 Savat"
 
-    kb = main_menu_kb(role)
+    if role == "customer" or role == "admin" or role == "operator":
+        if not shops:
+            text = (
+                f"👋 <b>{full_name}</b>, xush kelibsiz!\n"
+                f"🛍 <b>{platform}</b>\n\n"
+                f"🏪 Hozircha do'konlar yo'q."
+            )
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(cart_label, callback_data="cart_view")],
+                [InlineKeyboardButton("☰ Ko'proq", callback_data="more_menu")],
+            ])
+        else:
+            text = f"🛍 <b>{platform}</b> — Do'konlar\n\n"
+            buttons = []
+            for s in shops:
+                is_open = s["is_open"] if "is_open" in s.keys() else 1
+                status_icon = "🟢" if is_open else "🔴"
+                rating = f"⭐{s['rating']:.1f}" if s["rating"] else "⭐"
+                buttons.append([InlineKeyboardButton(
+                    f"{status_icon} {s['name']} {rating} | 🚚{format_price(s['delivery_price'])}",
+                    callback_data=f"shop_{s['id']}"
+                )])
+            buttons.append([
+                InlineKeyboardButton(cart_label, callback_data="cart_view"),
+                InlineKeyboardButton("☰ Ko'proq", callback_data="more_menu"),
+            ])
+            kb = InlineKeyboardMarkup(buttons)
+    else:
+        role_names = {"shop_owner": "Do'kon egasi", "courier": "Kuryer", "admin": "Admin", "operator": "Operator"}
+        text = (
+            f"👋 Xush kelibsiz, <b>{full_name}</b>!\n"
+            f"🛍 <b>{platform}</b>\n\n"
+            f"👤 Rolingiz: <b>{role_names.get(role, role)}</b>"
+        )
+        kb = main_menu_kb(role)
+
     if update.message:
         await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
     else:
         await update.callback_query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
 
 # ─── SHOPS LIST ────────────────────────────────────────────────────────────────
+async def more_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tg_id = update.effective_user.id
+    role = get_user_role(tg_id)
+
+    conn = get_db()
+    user_row = conn.execute("SELECT bonus_balance FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+    conn.close()
+    bonus = user_row["bonus_balance"] if user_row else 0
+
+    buttons = [
+        [InlineKeyboardButton("📦 Buyurtmalarim", callback_data="my_orders"),
+         InlineKeyboardButton("👤 Profil", callback_data="profile")],
+        [InlineKeyboardButton("❤️ Sevimlilar", callback_data="favorites"),
+         InlineKeyboardButton("🔗 Referal", callback_data="referral")],
+        [InlineKeyboardButton("🎟 Murojaat", callback_data="ticket_open"),
+         InlineKeyboardButton("💼 Ishga kirish", callback_data="job_apply")],
+    ]
+    if bonus > 0:
+        buttons.append([InlineKeyboardButton(f"💎 Bonus: {format_price(bonus)}", callback_data="profile")])
+    if role == "admin":
+        buttons.append([InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin_panel")])
+    if role == "operator":
+        buttons.append([InlineKeyboardButton("🎙 Operator Panel", callback_data="operator_panel")])
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")])
+
+    await q.edit_message_text(
+        "☰ <b>Qo'shimcha imkoniyatlar</b>",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML"
+    )
+
 async def shops_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -536,6 +603,7 @@ async def products_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     products = conn.execute(
         "SELECT * FROM products WHERE shop_id=? AND is_active=1", (shop_id,)
     ).fetchall()
+    shop = conn.execute("SELECT name, is_open FROM shops WHERE id=?", (shop_id,)).fetchone()
     conn.close()
 
     if not products:
@@ -545,18 +613,32 @@ async def products_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    is_open = shop["is_open"] if shop and "is_open" in shop.keys() else 1
+
     buttons = []
     for p in products:
         price = p["price"] * (1 - p["discount_percent"] / 100) if p["discount_percent"] else p["price"]
         disc = f" 🔥-{int(p['discount_percent'])}%" if p["discount_percent"] else ""
+        stock_txt = f" ({p['stock']} ta)" if p["stock"] < 10 else ""
         buttons.append([InlineKeyboardButton(
-            f"🛍 {p['name']}{disc} | {format_price(price)}",
-            callback_data=f"product_{p['id']}"
+            f"🛒 {p['name']}{disc} — {format_price(price)}{stock_txt}",
+            callback_data=f"add_cart_{p['id']}"
         )])
 
-    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data=f"shop_{shop_id}")])
+    cart = get_cart(context)
+    cart_count = sum(v["qty"] for v in cart.values())
+    cart_label = f"🛒 Savat ({cart_count})" if cart_count else "🛒 Savat"
+
+    buttons.append([
+        InlineKeyboardButton(cart_label, callback_data="cart_view"),
+        InlineKeyboardButton("⬅️ Orqaga", callback_data=f"shop_{shop_id}"),
+    ])
+
+    status = "🟢 Ochiq" if is_open else "🔴 Yopiq"
     await q.edit_message_text(
-        f"📦 <b>Mahsulotlar ro'yxati</b>",
+        f"📦 <b>{shop['name'] if shop else ''}</b> — mahsulotlar\n"
+        f"{status}\n\n"
+        f"<i>Mahsulotga bosing — savatga tushadi!</i>",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML"
     )
@@ -631,7 +713,7 @@ async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer("🔴 Do'kon hozir yopiq! Keyinroq urinib ko'ring.", show_alert=True)
         return
 
-    await q.answer("✅ Savatga qo'shildi!")
+    await q.answer(f"✅ {p['name']} savatga qo'shildi!")
 
     cart = get_cart(context)
     pid = str(product_id)
@@ -644,6 +726,44 @@ async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "qty": 1, "shop_id": p["shop_id"]
         }
     save_cart(context, cart)
+
+    # Mahsulotlar sahifasini yangilash (savat soni ko'rinsin)
+    cart_count = sum(v["qty"] for v in cart.values())
+    cart_label = f"🛒 Savat ({cart_count})"
+    shop_id = p["shop_id"]
+
+    conn2 = get_db()
+    products = conn2.execute("SELECT * FROM products WHERE shop_id=? AND is_active=1", (shop_id,)).fetchall()
+    shop2 = conn2.execute("SELECT name, is_open FROM shops WHERE id=?", (shop_id,)).fetchone()
+    conn2.close()
+
+    buttons = []
+    for pr in products:
+        price2 = pr["price"] * (1 - pr["discount_percent"] / 100) if pr["discount_percent"] else pr["price"]
+        disc2 = f" 🔥-{int(pr['discount_percent'])}%" if pr["discount_percent"] else ""
+        stock_txt = f" ({pr['stock']} ta)" if pr["stock"] < 10 else ""
+        buttons.append([InlineKeyboardButton(
+            f"🛒 {pr['name']}{disc2} — {format_price(price2)}{stock_txt}",
+            callback_data=f"add_cart_{pr['id']}"
+        )])
+
+    is_open2 = shop2["is_open"] if shop2 and "is_open" in shop2.keys() else 1
+    status2 = "🟢 Ochiq" if is_open2 else "🔴 Yopiq"
+    buttons.append([
+        InlineKeyboardButton(cart_label, callback_data="cart_view"),
+        InlineKeyboardButton("⬅️ Orqaga", callback_data=f"shop_{shop_id}"),
+    ])
+
+    try:
+        await q.edit_message_text(
+            f"📦 <b>{shop2['name'] if shop2 else ''}</b> — mahsulotlar\n"
+            f"{status2}\n\n"
+            f"<i>Mahsulotga bosing — savatga tushadi!</i>",
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="HTML"
+        )
+    except:
+        pass
 
 async def cart_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -682,8 +802,8 @@ async def cart_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons += [
         [InlineKeyboardButton("🎫 Promo kod", callback_data="promo_enter"),
          InlineKeyboardButton("🗑 Tozalash", callback_data="cart_clear")],
-        [InlineKeyboardButton("✅ Buyurtma berish", callback_data="checkout")],
-        [InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")],
+        [InlineKeyboardButton("🛍 Do'konlarga qaytish", callback_data="main_menu")],
+        [InlineKeyboardButton("✅ ZAKAZ BERISH", callback_data="checkout")],
     ]
 
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
@@ -3798,17 +3918,9 @@ async def noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    tg_id = update.effective_user.id
-    role = get_user_role(tg_id)
-    platform = get_setting("platform_name", "OsonSavdo")
-    full_name = update.effective_user.full_name or ""
-
-    text = (
-        f"🛍 <b>{platform}</b>\n"
-        f"Xush kelibsiz, <b>{full_name}</b>!\n"
-        f"─────────────────────"
-    )
-    await q.edit_message_text(text, reply_markup=main_menu_kb(role), parse_mode="HTML")
+    # start funksiyasini qayta ishlatamiz
+    update.message = None
+    await start(update, context)
 
 # ─── APPLICATION ───────────────────────────────────────────────────────────────
 def main():
@@ -4048,6 +4160,7 @@ def main():
 
     # Callback handlers
     app.add_handler(CallbackQueryHandler(main_menu_cb, pattern="^main_menu$"))
+    app.add_handler(CallbackQueryHandler(more_menu, pattern="^more_menu$"))
     app.add_handler(CallbackQueryHandler(shops_list, pattern="^shops_list$"))
     app.add_handler(CallbackQueryHandler(shop_detail, pattern=r"^shop_\d+$"))
     app.add_handler(CallbackQueryHandler(products_list, pattern=r"^products_\d+$"))
