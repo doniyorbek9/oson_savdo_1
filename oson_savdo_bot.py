@@ -37,7 +37,7 @@ except ImportError:
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 BOT_TOKEN = "8609713083:AAFoh_EZqps4cSIs7sdTqdoWpFBox_Z-C80"
 ADMIN_ID = 7948989650
-DB_PATH = "oson_savdo.db"
+DB_PATH = "/data/oson_savdo.db"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -4372,7 +4372,7 @@ def main():
         asyncio.create_task(subscription_loop())
         asyncio.create_task(shop_hours_loop())
 
-    persistence = PicklePersistence(filepath="oson_savdo_persistence")
+    persistence = PicklePersistence(filepath="/data/oson_savdo_persistence")
     app = Application.builder().token(BOT_TOKEN).persistence(persistence).post_init(on_startup).build()
 
     # Conversation handlers
