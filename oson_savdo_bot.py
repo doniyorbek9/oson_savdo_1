@@ -69,7 +69,8 @@ logger = logging.getLogger(__name__)
     WAITING_PROMO_LIMIT, WAITING_PROMO_DAYS, WAITING_PROMO_MIN_AMOUNT,
     WAITING_PHONE_NAME, WAITING_PHONE_NUMBER,
     WAITING_TEL_ORDER_ITEMS, WAITING_TEL_ORDER_ADDRESS,
-) = range(44)
+    WAITING_RESET_PASSWORD, WAITING_RESET_CONFIRM,
+) = range(46)
 
 # ─── DATABASE ──────────────────────────────────────────────────────────────────
 def get_db():
@@ -4206,9 +4207,112 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("💰 Komissiya o'zgartirish", callback_data="admin_commission")],
         [InlineKeyboardButton("➕ Telefon raqam qo'shish", callback_data="add_phone")],
         *phone_buttons,
+        [InlineKeyboardButton("🗑 Barcha ma'lumotlarni o'chirish", callback_data="admin_reset_start")],
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")],
     ])
     await safe_edit(q, text, reply_markup=kb, parse_mode="HTML")
+
+# ─── RESET ALL DATA ────────────────────────────────────────────────────────────
+RESET_PASSWORD = "DELETE2024CONFIRM"
+
+async def admin_reset_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if update.effective_user.id != ADMIN_ID:
+        await q.answer("❌ Ruxsat yo'q!", show_alert=True)
+        return
+
+    await safe_edit(q,
+        "🚨 <b>DIQQAT! XAVFLI AMAL!</b>\n\n"
+        "Bu amal quyidagi barcha ma'lumotlarni o'chiradi:\n"
+        "• Barcha buyurtmalar\n"
+        "• Barcha foydalanuvchilar\n"
+        "• Barcha do'konlar va mahsulotlar\n"
+        "• Barcha kuryerlar\n"
+        "• Barcha promo kodlar\n"
+        "• Barcha ticketlar\n\n"
+        "🔐 Davom etish uchun <b>maxfiy parolni</b> kiriting:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Bekor qilish", callback_data="admin_settings")]
+        ])
+    )
+    return WAITING_RESET_PASSWORD
+
+async def admin_reset_got_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return ConversationHandler.END
+
+    entered = update.message.text.strip()
+    try:
+        await update.message.delete()
+    except:
+        pass
+
+    if entered != RESET_PASSWORD:
+        await update.message.reply_text(
+            "❌ <b>Parol noto'g'ri!</b>\nAmal bekor qilindi.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_settings")]])
+        )
+        return ConversationHandler.END
+
+    context.user_data["reset_confirmed_step1"] = True
+    await update.message.reply_text(
+        "⚠️ <b>Oxirgi ogohlantirish!</b>\n\n"
+        "Siz haqiqatan ham <b>BARCHA</b> ma'lumotlarni o'chirishni xohlaysizmi?\n\n"
+        "Bu amalni QAYTARIB BO'LMAYDI!\n\n"
+        "Tasdiqlash uchun: <code>HA, O'CHIR</code> deb yozing",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Bekor qilish", callback_data="admin_settings")]])
+    )
+    return WAITING_RESET_CONFIRM
+
+async def admin_reset_got_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return ConversationHandler.END
+
+    entered = update.message.text.strip()
+    try:
+        await update.message.delete()
+    except:
+        pass
+
+    if entered != "HA, O'CHIR":
+        await update.message.reply_text(
+            "❌ <b>Bekor qilindi.</b>\nNoto'g'ri tasdiqlash so'zi kiritildi.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_settings")]])
+        )
+        return ConversationHandler.END
+
+    if not context.user_data.get("reset_confirmed_step1"):
+        return ConversationHandler.END
+
+    # O'chirish
+    try:
+        conn = get_db()
+        tables = ["orders", "users", "shops", "products", "couriers",
+                  "courier_queue", "promo_codes", "favorites", "reviews",
+                  "tickets", "ticket_messages", "operator_orders",
+                  "notifications", "shop_subscriptions"]
+        for table in tables:
+            conn.execute(f"DELETE FROM {table}")
+        conn.commit()
+        conn.close()
+
+        context.user_data.clear()
+        await update.message.reply_text(
+            "✅ <b>Barcha ma'lumotlar o'chirildi.</b>\n\nBot tozalandi.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Bosh menyu", callback_data="main_menu")]])
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ <b>Xato yuz berdi:</b> {e}",
+            parse_mode="HTML"
+        )
+
+    return ConversationHandler.END
 
 # ─── OPERATOR PANEL ────────────────────────────────────────────────────────────
 async def operator_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4528,6 +4632,20 @@ def main():
         per_message=False,
     )
     app.add_handler(sub_conv)
+
+    reset_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_reset_start, pattern="^admin_reset_start$")],
+        states={
+            WAITING_RESET_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_reset_got_password)],
+            WAITING_RESET_CONFIRM:  [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_reset_got_confirm)],
+        },
+        fallbacks=[
+            CallbackQueryHandler(lambda u, c: ConversationHandler.END, pattern="^admin_settings$"),
+        ],
+        per_message=False,
+        allow_reentry=True,
+    )
+    app.add_handler(reset_conv)
 
     # Callback handlers
     app.add_handler(CallbackQueryHandler(main_menu_cb, pattern="^main_menu$"))
