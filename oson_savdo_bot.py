@@ -4607,7 +4607,7 @@ def main():
         fallbacks=[],
         per_message=False,
     )
-    app.add_handler(tel_order_conv)
+    app.add_handler(tel_order_conv, group=1)
 
     app.add_handler(CommandHandler("start", start))
 
