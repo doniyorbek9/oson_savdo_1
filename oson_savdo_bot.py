@@ -23,8 +23,7 @@ from telegram import (
 )
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, filters, ContextTypes, ConversationHandler,
-    PicklePersistence
+    MessageHandler, filters, ContextTypes, ConversationHandler
 )
 
 try:
@@ -37,7 +36,7 @@ except ImportError:
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 BOT_TOKEN = "8609713083:AAFoh_EZqps4cSIs7sdTqdoWpFBox_Z-C80"
 ADMIN_ID = 7948989650
-DB_PATH = "/data/oson_savdo.db"
+DB_PATH = "oson_savdo.db"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -623,65 +622,14 @@ async def shop_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{rating_str} ({shop['total_reviews']} sharh)\n"
     )
 
-    # Bu do'konn telefon raqamlari
-    phones_raw = get_setting("order_phones", "")
-    phones = json.loads(phones_raw) if phones_raw else []
-    shop_phones = [p for p in phones if p.get("shop_id") == shop_id]
-
-    phone_buttons = []
-    if shop_phones:
-        phone_text = "\n📞 <b>Telefon orqali buyurtma:</b>\n"
-        for p in shop_phones:
-            phone_text += f"👤 {p['name']}: <code>{p['phone']}</code>\n"
-        phone_buttons = [[InlineKeyboardButton("📞 Telefon orqali buyurtma", callback_data=f"shop_call_{shop_id}")]]
-    else:
-        phone_text = ""
-
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📦 Mahsulotlar", callback_data=f"products_{shop_id}")],
         [InlineKeyboardButton(fav_btn, callback_data=fav_cb)],
         [InlineKeyboardButton("⭐ Reyting qo'y", callback_data=f"rate_shop_{shop_id}"),
          InlineKeyboardButton("🛒 Savat", callback_data="cart_view")],
-        *phone_buttons,
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="shops_list")],
     ])
-    await q.edit_message_text(text + phone_text, reply_markup=kb, parse_mode="HTML")
-
-# ─── MIJOZ TELEFON BUYURTMA ───────────────────────────────────────────────────
-async def shop_call_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    shop_id = int(q.data.split("_")[2])
-
-    phones_raw = get_setting("order_phones", "")
-    phones = json.loads(phones_raw) if phones_raw else []
-    shop_phones = [p for p in phones if p.get("shop_id") == shop_id]
-
-    conn = get_db()
-    shop = conn.execute("SELECT name FROM shops WHERE id=?", (shop_id,)).fetchone()
-    conn.close()
-    shop_name = shop["name"] if shop else ""
-
-    if not shop_phones:
-        await q.edit_message_text(
-            "📞 <b>Telefon orqali buyurtma</b>\n\n"
-            "⚠️ Bu do\'kon uchun telefon raqam belgilanmagan.\n"
-            "Iltimos, bot orqali buyurtma bering.",
-            parse_mode="HTML",
-            reply_markup=back_kb(f"shop_{shop_id}")
-        )
-        return
-
-    text = f"📞 <b>{shop_name} — Telefon buyurtma</b>\n\nQuyidagi raqamga qo\'ng\'iroq qiling:\n\n"
-    for p in shop_phones:
-        text += f"👤 <b>{p['name']}</b>\n📱 <code>{p['phone']}</code>\n\n"
-    text += "📋 Operator sizning buyurtmangizni qabul qilib, kuryerga uzatadi."
-
-    await q.edit_message_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=back_kb(f"shop_{shop_id}")
-    )
+    await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
 
 # ─── PRODUCTS ──────────────────────────────────────────────────────────────────
 async def products_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -906,8 +854,7 @@ async def cart_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cart = get_cart(context)
     if pid not in cart:
-        await q.answer("⚠️ Savat yangilandi, qayta oching", show_alert=True)
-        await cart_view(update, context)
+        await q.answer()
         return
 
     if action == "inc":
@@ -921,15 +868,6 @@ async def cart_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     save_cart(context, cart)
     await q.answer("✅")
-
-    # Savat bo'm-bo'sh bo'lib qolsa
-    if not cart:
-        await q.edit_message_text(
-            "🛒 Savat bo'sh!\n\nDo'konlardan mahsulot qo'shing.",
-            reply_markup=back_kb("shops_list")
-        )
-        return
-
     await cart_view(update, context)
 
 async def cart_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1049,10 +987,6 @@ async def got_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    if q.data == "pay_bonus":
-        context.user_data["payment_method"] = "bonus"
-        await place_order(update, context, screenshot=None)
-        return
     method = "card" if q.data == "pay_card" else "cash"
     context.user_data["payment_method"] = method
 
@@ -1215,7 +1149,16 @@ async def place_order(update, context, screenshot=None):
         f"🚴 Kuryer: {'Premium ⚡' if ctype == 'premium' else 'Oddiy'}\n"
     )
 
-    # Admin notify o'chirilgan — faqat do'kon egasiga xabar boradi
+    # Notify admin — faqat ko'rish tugmasi
+    admin_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Buyurtmani ko'rish", callback_data=f"admin_order_{order_id}")],
+    ])
+    try:
+        await context.bot.send_message(ADMIN_ID, order_text, reply_markup=admin_kb, parse_mode="HTML")
+        if screenshot:
+            await context.bot.send_photo(ADMIN_ID, screenshot, caption=f"📸 #{1000 + order_id} to'lov cheki")
+    except:
+        pass
 
     # Notify shop owner — qabul/rad tugmalari bilan
     if shop:
@@ -2003,46 +1946,21 @@ async def got_tel_order_items(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def got_tel_order_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     address = update.message.text.strip()
-    shop_id = context.user_data.get("tel_order_shop_id")
-    items_text = context.user_data.get("tel_order_items", "")
-
-    # Tasdiqlash sahifasini ko'rsatish (hali saqlamay)
-    context.user_data["tel_order_address"] = address
-
-    summary = (
-        f"📞 <b>Telefon buyurtma — tasdiqlang</b>\n\n"
-        f"📋 <b>Mahsulotlar:</b>\n<pre>{items_text}</pre>\n\n"
-        f"📍 <b>Manzil:</b> {address}\n"
-        f"💵 <b>To'lov:</b> Naqd\n\n"
-        f"✅ Tasdiqlaysizmi?"
-    )
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"tel_confirm_{shop_id}"),
-         InlineKeyboardButton("❌ Bekor", callback_data="my_shop")],
-    ])
-    await update.message.reply_text(summary, reply_markup=kb, parse_mode="HTML")
-    return ConversationHandler.END
-
-async def tel_order_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    shop_id = int(q.data.split("_")[2])
+    shop_id = context.user_data.pop("tel_order_shop_id", None)
+    items_text = context.user_data.pop("tel_order_items", "")
     owner_tg_id = update.effective_user.id
 
-    address = context.user_data.pop("tel_order_address", "")
-    items_text = context.user_data.pop("tel_order_items", "")
-    context.user_data.pop("tel_order_shop_id", None)
-
     conn = get_db()
-    shop = conn.execute("SELECT * FROM shops WHERE id=?", (shop_id,)).fetchone()
+    shop = conn.execute("SELECT name FROM shops WHERE id=?", (shop_id,)).fetchone()
 
+    # Oddiy order sifatida saqlash
     cur = conn.execute(
         """INSERT INTO orders (user_tg_id, shop_id, items, address, payment_method,
-           payment_status, subtotal, delivery_price, total, commission, courier_type, premium_fee, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           payment_status, subtotal, delivery_price, total, commission, courier_type, premium_fee)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (owner_tg_id, shop_id,
          json.dumps({"tel": {"name": items_text, "price": 0, "qty": 1, "shop_id": shop_id}}),
-         address, "cash", "cash", 0, 0, 0, 0, "standard", 0, "confirmed")
+         address, "cash", "cash", 0, 0, 0, 0, "standard", 0)
     )
     order_id = cur.lastrowid
     conn.commit()
@@ -2056,16 +1974,27 @@ async def tel_order_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💵 To'lov: Naqd\n"
     )
 
-    await q.edit_message_text(
+    # Adminga xabar
+    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+    admin_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Ko'rish", callback_data=f"admin_order_{order_id}")]
+    ])
+    try:
+        await update.get_bot().send_message(
+            int(get_setting("admin_id", str(owner_tg_id))),
+            order_text, reply_markup=admin_kb, parse_mode="HTML"
+        )
+    except:
+        pass
+
+    await update.message.reply_text(
         f"✅ <b>Telefon buyurtma #{1000 + order_id} saqlandi!</b>\n\n"
         f"{order_text}\n"
-        f"🚴 Kuryer tayinlanmoqda...",
+        f"Kuryer tayinlash uchun admin tasdiqlashini kuting.",
         parse_mode="HTML",
         reply_markup=back_kb("my_shop")
     )
-
-    # Kuryer tayinlash (do'kon egasi o'zi tasdiqladi, admin kerak emas)
-    await assign_courier(context, order_id, "standard")
+    return ConversationHandler.END
 
 async def toggle_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -2105,32 +2034,14 @@ async def shop_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if shop and shop["card_number"]:
         card_info = f"\n\n💳 Joriy karta: <b>{shop['card_number']}</b>\n👤 Ism: <b>{shop['card_holder'] or 'Kiritilmagan'}</b>"
 
-    # Bu do'konga tegishli telefon raqamlar
-    phones_raw = get_setting("order_phones", "")
-    phones = json.loads(phones_raw) if phones_raw else []
-    shop_phones = [(i, p) for i, p in enumerate(phones) if p.get("shop_id") == shop_id]
-
-    phone_info = ""
-    phone_del_buttons = []
-    if shop_phones:
-        phone_info = "\n\n📞 <b>Telefon raqamlar:</b>\n"
-        for local_idx, (_, p) in enumerate(shop_phones):
-            phone_info += f"👤 {p['name']}: <code>{p['phone']}</code>\n"
-            phone_del_buttons.append([InlineKeyboardButton(
-                f"🗑 O'chirish: {p['name']} ({p['phone']})",
-                callback_data=f"shop_del_phone_{shop_id}_{local_idx}"
-            )])
-
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💰 Yetkazish narxi", callback_data=f"set_delivery_{shop_id}"),
          InlineKeyboardButton("⏰ Ish vaqti", callback_data=f"set_hours_{shop_id}")],
         [InlineKeyboardButton("💳 To'lov tizimini tahrirlash", callback_data=f"set_payment_{shop_id}")],
-        [InlineKeyboardButton("📞 Telefon raqam qo'shish", callback_data=f"shop_phone_{shop_id}")],
-        *phone_del_buttons,
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="my_shop")],
     ])
     await q.edit_message_text(
-        f"⚙️ Do'kon sozlamalari:{card_info}{phone_info}",
+        f"⚙️ Do'kon sozlamalari:{card_info}",
         reply_markup=kb,
         parse_mode="HTML"
     )
@@ -2308,192 +2219,6 @@ async def got_card_holder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=back_kb(f"shop_settings_{shop_id}")
     )
     return ConversationHandler.END
-# ─── ADMIN TELEFON RAQAM BOSHQARUVI ───────────────────────────────────────────
-async def add_phone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    tg_id = update.effective_user.id
-    if tg_id != ADMIN_ID:
-        await q.answer("❌ Ruxsat yo'q!", show_alert=True)
-        return ConversationHandler.END
-
-    await q.edit_message_text(
-        "📞 <b>Yangi telefon raqam qo'shish</b>\n\n"
-        "<b>1-qadam:</b> Ism yoki lavozimni kiriting:\n"
-        "<i>Masalan: Operator Sherzod</i>",
-        parse_mode="HTML",
-        reply_markup=back_kb("admin_settings")
-    )
-    return WAITING_PHONE_NAME
-
-async def got_admin_phone_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    name = update.message.text.strip()
-    if len(name) < 2:
-        await update.message.reply_text("❌ Ism juda qisqa, qaytadan kiriting:")
-        return WAITING_PHONE_NAME
-    context.user_data["new_phone_name"] = name
-    await update.message.reply_text(
-        f"✅ Ism: <b>{name}</b>\n\n"
-        f"<b>2-qadam:</b> Telefon raqamni kiriting:\n"
-        f"<i>Masalan: +998901234567</i>",
-        parse_mode="HTML"
-    )
-    return WAITING_PHONE_NUMBER
-
-async def got_admin_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    phone = update.message.text.strip()
-    if not phone.startswith("+") or len(phone) < 9:
-        await update.message.reply_text(
-            "❌ Noto'g'ri format. Masalan: <code>+998901234567</code>",
-            parse_mode="HTML"
-        )
-        return WAITING_PHONE_NUMBER
-
-    name = context.user_data.pop("new_phone_name", "")
-    phones_raw = get_setting("order_phones", "")
-    phones = json.loads(phones_raw) if phones_raw else []
-    phones.append({"name": name, "phone": phone})
-    set_setting("order_phones", json.dumps(phones, ensure_ascii=False))
-
-    await update.message.reply_text(
-        f"✅ <b>Telefon raqam qo'shildi!</b>\n\n"
-        f"👤 Ism: <b>{name}</b>\n"
-        f"📱 Raqam: <code>{phone}</code>",
-        parse_mode="HTML",
-        reply_markup=back_kb("admin_settings")
-    )
-    return ConversationHandler.END
-
-async def del_phone_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    tg_id = update.effective_user.id
-    if tg_id != ADMIN_ID:
-        await q.answer("❌ Ruxsat yo'q!", show_alert=True)
-        return
-
-    idx = int(q.data.split("_")[2])
-    phones_raw = get_setting("order_phones", "")
-    phones = json.loads(phones_raw) if phones_raw else []
-
-    if 0 <= idx < len(phones):
-        removed = phones.pop(idx)
-        set_setting("order_phones", json.dumps(phones, ensure_ascii=False))
-        await q.answer(f"✅ {removed['name']} o'chirildi!", show_alert=True)
-    else:
-        await q.answer("❌ Topilmadi!", show_alert=True)
-
-    # Sahifani yangilash
-    await admin_settings(update, context)
-
-# ─── DO'KON EGASI TELEFON RAQAM BOSHQARUVI ────────────────────────────────────
-async def shop_phone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    shop_id = int(q.data.split("_")[2])
-    context.user_data["shop_phone_shop_id"] = shop_id
-
-    phones_raw = get_setting("order_phones", "")
-    phones = json.loads(phones_raw) if phones_raw else []
-
-    conn = get_db()
-    shop = conn.execute("SELECT name FROM shops WHERE id=?", (shop_id,)).fetchone()
-    conn.close()
-    shop_name = shop["name"] if shop else ""
-
-    # Bu do'konga tegishli raqamlar
-    my_phones = [p for p in phones if p.get("shop_id") == shop_id]
-    my_phones_text = ""
-    if my_phones:
-        my_phones_text = "\n\n📞 <b>Joriy raqamlaringiz:</b>\n"
-        for p in my_phones:
-            my_phones_text += f"👤 {p['name']}: <code>{p['phone']}</code>\n"
-
-    await q.edit_message_text(
-        f"📞 <b>Telefon raqam qo'shish</b>{my_phones_text}\n\n"
-        f"<b>1-qadam:</b> Mas'ul shaxs ismini kiriting:\n"
-        f"<i>Masalan: Operator Sherzod</i>",
-        parse_mode="HTML",
-        reply_markup=back_kb(f"shop_settings_{shop_id}")
-    )
-    return WAITING_PHONE_NAME
-
-async def got_shop_phone_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    name = update.message.text.strip()
-    if len(name) < 2:
-        await update.message.reply_text("❌ Ism juda qisqa, qaytadan kiriting:")
-        return WAITING_PHONE_NAME
-    context.user_data["new_shop_phone_name"] = name
-    await update.message.reply_text(
-        f"✅ Ism: <b>{name}</b>\n\n"
-        f"<b>2-qadam:</b> Telefon raqamni kiriting:\n"
-        f"<i>Masalan: +998901234567</i>",
-        parse_mode="HTML"
-    )
-    return WAITING_PHONE_NUMBER
-
-async def got_shop_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    phone = update.message.text.strip()
-    if not phone.startswith("+") or len(phone) < 9:
-        await update.message.reply_text(
-            "❌ Noto'g'ri format. Masalan: <code>+998901234567</code>",
-            parse_mode="HTML"
-        )
-        return WAITING_PHONE_NUMBER
-
-    name = context.user_data.pop("new_shop_phone_name", "")
-    shop_id = context.user_data.pop("shop_phone_shop_id", None)
-
-    conn = get_db()
-    shop = conn.execute("SELECT name FROM shops WHERE id=?", (shop_id,)).fetchone()
-    conn.close()
-    shop_name = shop["name"] if shop else ""
-
-    phones_raw = get_setting("order_phones", "")
-    phones = json.loads(phones_raw) if phones_raw else []
-    phones.append({"name": name, "phone": phone, "shop_id": shop_id, "shop_name": shop_name})
-    set_setting("order_phones", json.dumps(phones, ensure_ascii=False))
-
-    await update.message.reply_text(
-        f"✅ <b>Telefon raqam qo'shildi!</b>\n\n"
-        f"👤 Ism: <b>{name}</b>\n"
-        f"📱 Raqam: <code>{phone}</code>\n"
-        f"🏪 Do'kon: <b>{shop_name}</b>\n\n"
-        f"Endi mijozlar 'Telefon orqali buyurtma' bo'limida shu raqamni ko'radi.",
-        parse_mode="HTML",
-        reply_markup=back_kb(f"shop_settings_{shop_id}")
-    )
-    return ConversationHandler.END
-
-async def shop_del_phone_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    # shop_del_phone_{shop_id}_{idx}
-    parts = q.data.split("_")
-    shop_id = int(parts[3])
-    idx = int(parts[4])
-
-    phones_raw = get_setting("order_phones", "")
-    phones = json.loads(phones_raw) if phones_raw else []
-
-    # Faqat shu do'konga tegishli raqamlar indeksi
-    shop_phones_idx = [i for i, p in enumerate(phones) if p.get("shop_id") == shop_id]
-
-    if 0 <= idx < len(shop_phones_idx):
-        real_idx = shop_phones_idx[idx]
-        removed = phones.pop(real_idx)
-        set_setting("order_phones", json.dumps(phones, ensure_ascii=False))
-        await q.answer(f"✅ {removed['name']} o'chirildi!", show_alert=True)
-    else:
-        await q.answer("❌ Topilmadi!", show_alert=True)
-        return
-
-    # shop_settings sahifasiga qaytish
-    context_data_backup = q.data
-    q.data = f"shop_settings_{shop_id}"
-    await shop_settings(update, context)
-    q.data = context_data_backup
-
 async def job_apply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -4336,51 +4061,9 @@ async def noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    tg_id = update.effective_user.id
-    role = get_user_role(tg_id)
-    platform = get_setting("platform_name", "OsonSavdo")
-
-    conn = get_db()
-    shops = conn.execute("SELECT * FROM shops WHERE status='approved' ORDER BY rating DESC").fetchall()
-    conn.close()
-
-    cart = get_cart(context)
-    cart_count = sum(v["qty"] for v in cart.values())
-    cart_label = f"🛒 Savat ({cart_count})" if cart_count else "🛒 Savat"
-
-    if role in ("customer", "admin", "operator"):
-        if not shops:
-            text = f"🛍 <b>{platform}</b>\n\n🏪 Hozircha do'konlar yo'q."
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(cart_label, callback_data="cart_view")],
-                [InlineKeyboardButton("☰ Ko'proq", callback_data="more_menu")],
-            ])
-        else:
-            text = f"🛍 <b>{platform}</b> — Do'konlar\n\n"
-            buttons = []
-            for s in shops:
-                is_open = s["is_open"] if "is_open" in s.keys() else 1
-                status_icon = "🟢" if is_open else "🔴"
-                rating = f"⭐{s['rating']:.1f}" if s["rating"] else "⭐"
-                buttons.append([InlineKeyboardButton(
-                    f"{status_icon} {s['name']} {rating} | 🚚{format_price(s['delivery_price'])}",
-                    callback_data=f"shop_{s['id']}"
-                )])
-            buttons.append([
-                InlineKeyboardButton(cart_label, callback_data="cart_view"),
-                InlineKeyboardButton("☰ Ko'proq", callback_data="more_menu"),
-            ])
-            kb = InlineKeyboardMarkup(buttons)
-    else:
-        role_names = {"shop_owner": "Do'kon egasi", "courier": "Kuryer", "admin": "Admin", "operator": "Operator"}
-        text = (
-            f"👋 <b>{q.from_user.full_name}</b>!\n"
-            f"🛍 <b>{platform}</b>\n\n"
-            f"👤 Rolingiz: <b>{role_names.get(role, role)}</b>"
-        )
-        kb = main_menu_kb(role)
-
-    await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+    # start funksiyasini qayta ishlatamiz
+    update.message = None
+    await start(update, context)
 
 # ─── APPLICATION ───────────────────────────────────────────────────────────────
 def main():
@@ -4414,8 +4097,7 @@ def main():
         asyncio.create_task(subscription_loop())
         asyncio.create_task(shop_hours_loop())
 
-    persistence = PicklePersistence(filepath="/data/oson_savdo_persistence")
-    app = Application.builder().token(BOT_TOKEN).persistence(persistence).post_init(on_startup).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(on_startup).build()
 
     # Conversation handlers
     checkout_conv = ConversationHandler(
@@ -4617,49 +4299,13 @@ def main():
     )
     app.add_handler(sub_conv)
 
-    # Admin telefon raqam qo'shish
-    admin_phone_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(add_phone_start, pattern="^add_phone$")],
-        states={
-            WAITING_PHONE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_admin_phone_name)],
-            WAITING_PHONE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_admin_phone_number)],
-        },
-        fallbacks=[],
-        per_message=False,
-    )
-    app.add_handler(admin_phone_conv, group=2)
-
-    # Do'kon egasi telefon raqam qo'shish
-    shop_phone_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(shop_phone_start, pattern=r"^shop_phone_\d+$")],
-        states={
-            WAITING_PHONE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_shop_phone_name)],
-            WAITING_PHONE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_shop_phone_number)],
-        },
-        fallbacks=[],
-        per_message=False,
-    )
-    app.add_handler(shop_phone_conv, group=3)
-
-    # Do'kon egasi telefon orqali buyurtma kiritish
-    tel_order_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(tel_order_new, pattern=r"^tel_order_new_\d+$")],
-        states={
-            WAITING_TEL_ORDER_ITEMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_tel_order_items)],
-            WAITING_TEL_ORDER_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_tel_order_address)],
-        },
-        fallbacks=[],
-        per_message=False,
-    )
-    app.add_handler(tel_order_conv, group=1)
-
     app.add_handler(CommandHandler("start", start))
 
     # Callback handlers
     app.add_handler(CallbackQueryHandler(main_menu_cb, pattern="^main_menu$"))
     app.add_handler(CallbackQueryHandler(more_menu, pattern="^more_menu$"))
     app.add_handler(CallbackQueryHandler(shops_list, pattern="^shops_list$"))
-    app.add_handler(CallbackQueryHandler(shop_detail, pattern=r"^shop_(?!call_|settings_|orders|report|confirm_|reject_|rating_)\d+$"))
+    app.add_handler(CallbackQueryHandler(shop_detail, pattern=r"^shop_\d+$"))
     app.add_handler(CallbackQueryHandler(products_list, pattern=r"^products_\d+$"))
     app.add_handler(CallbackQueryHandler(product_detail, pattern=r"^product_\d+$"))
     app.add_handler(CallbackQueryHandler(add_to_cart, pattern=r"^add_cart_\d+$"))
@@ -4667,6 +4313,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cart_update, pattern=r"^cart_(inc|dec|del)_\d+$"))
     app.add_handler(CallbackQueryHandler(cart_clear, pattern="^cart_clear$"))
     app.add_handler(CallbackQueryHandler(payment_method, pattern="^pay_(card|cash|bonus)$"))
+    app.add_handler(CallbackQueryHandler(phone_order_view, pattern="^phone_order$"))
     app.add_handler(CallbackQueryHandler(my_orders, pattern="^my_orders$"))
     app.add_handler(CallbackQueryHandler(order_detail, pattern=r"^order_detail_\d+$"))
     app.add_handler(CallbackQueryHandler(reorder, pattern=r"^reorder_\d+$"))
@@ -4723,11 +4370,6 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_sub_settings, pattern=r"^admin_sub_\d+$"))
     app.add_handler(CallbackQueryHandler(toggle_shop, pattern=r"^toggle_shop_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_toggle_shop, pattern=r"^admin_toggle_shop_\d+$"))
-    app.add_handler(CallbackQueryHandler(del_phone_cb, pattern=r"^del_phone_\d+$"))
-    app.add_handler(CallbackQueryHandler(shop_del_phone_cb, pattern=r"^shop_del_phone_\d+_\d+$"))
-    app.add_handler(CallbackQueryHandler(tel_order_confirm, pattern=r"^tel_confirm_\d+$"))
-    app.add_handler(CallbackQueryHandler(phone_order_view, pattern="^phone_order$"))
-    app.add_handler(CallbackQueryHandler(shop_call_view, pattern=r"^shop_call_\d+$"))
 
     logger.info("🚀 OsonSavdo Bot ishga tushdi!")
     app.run_polling(drop_pending_updates=True)
