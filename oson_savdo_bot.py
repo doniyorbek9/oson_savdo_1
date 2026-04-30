@@ -59,7 +59,9 @@ logger = logging.getLogger(__name__)
     WAITING_ADMIN_SHOP_NAME, WAITING_ADMIN_SHOP_DESC, WAITING_ADMIN_SHOP_OWNER,
     WAITING_CARD_NUMBER, WAITING_CARD_HOLDER,
     WAITING_SUB_PERCENT,
-) = range(34)
+    WAITING_PROMO_CODE, WAITING_PROMO_TYPE, WAITING_PROMO_VALUE,
+    WAITING_PROMO_LIMIT, WAITING_PROMO_DAYS, WAITING_PROMO_MIN_AMOUNT,
+) = range(40)
 
 # ─── DATABASE ──────────────────────────────────────────────────────────────────
 def get_db():
@@ -105,6 +107,7 @@ def init_db():
         total_reviews INTEGER DEFAULT 0,
         card_number TEXT DEFAULT '',
         card_holder TEXT DEFAULT '',
+        is_open INTEGER DEFAULT 1,
         created_at TEXT DEFAULT (datetime('now'))
     );
 
@@ -174,6 +177,7 @@ def init_db():
         used_count INTEGER DEFAULT 0,
         expires_at TEXT,
         is_active INTEGER DEFAULT 1,
+        min_order_amount REAL DEFAULT 0,
         created_at TEXT DEFAULT (datetime('now'))
     );
 
@@ -262,6 +266,14 @@ def migrate_db():
         pass
     try:
         c.execute("ALTER TABLE shops ADD COLUMN card_holder TEXT DEFAULT ''")
+    except:
+        pass
+    try:
+        c.execute("ALTER TABLE promo_codes ADD COLUMN min_order_amount REAL DEFAULT 0")
+    except:
+        pass
+    try:
+        c.execute("ALTER TABLE shops ADD COLUMN is_open INTEGER DEFAULT 1")
     except:
         pass
     try:
@@ -453,8 +465,10 @@ async def shops_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = []
     for s in shops:
         stars = "⭐" * int(s["rating"]) if s["rating"] else "⭐"
+        is_open = s["is_open"] if "is_open" in s.keys() else 1
+        closed_mark = " 🔴" if not is_open else ""
         buttons.append([InlineKeyboardButton(
-            f"🏪 {s['name']} {stars} | 🚚 {format_price(s['delivery_price'])}",
+            f"🏪 {s['name']}{closed_mark} {stars} | 🚚 {format_price(s['delivery_price'])}",
             callback_data=f"shop_{s['id']}"
         )])
 
@@ -598,15 +612,24 @@ def save_cart(context, cart: dict):
 
 async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    await q.answer("✅ Savatga qo'shildi!")
     product_id = int(q.data.split("_")[2])
 
     conn = get_db()
     p = conn.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
+    if not p:
+        await q.answer("❌ Mahsulot topilmadi!", show_alert=True)
+        conn.close()
+        return
+
+    shop = conn.execute("SELECT is_open FROM shops WHERE id=?", (p["shop_id"],)).fetchone()
     conn.close()
 
-    if not p:
+    is_open = shop["is_open"] if shop and "is_open" in shop.keys() else 1
+    if not is_open:
+        await q.answer("🔴 Do'kon hozir yopiq! Keyinroq urinib ko'ring.", show_alert=True)
         return
+
+    await q.answer("✅ Savatga qo'shildi!")
 
     cart = get_cart(context)
     pid = str(product_id)
@@ -730,6 +753,15 @@ async def promo_apply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cart = get_cart(context)
     subtotal = sum(v["price"] * v["qty"] for v in cart.values())
 
+    min_amount = promo["min_order_amount"] if promo["min_order_amount"] else 0
+    if min_amount > 0 and subtotal < min_amount:
+        await update.message.reply_text(
+            f"❌ Bu promo kod faqat <b>{format_price(min_amount)}</b> dan yuqori buyurtmalarda ishlaydi.\n"
+            f"Sizning savatcha: <b>{format_price(subtotal)}</b>",
+            parse_mode="HTML"
+        )
+        return ConversationHandler.END
+
     if promo["discount_type"] == "percent":
         discount = subtotal * promo["discount_value"] / 100
     else:
@@ -766,14 +798,28 @@ async def checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def got_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     address = update.message.text.strip()
     context.user_data["order_address"] = address
+    tg_id = update.effective_user.id
 
-    kb = InlineKeyboardMarkup([
+    # Bonus balansini tekshir
+    conn = get_db()
+    user = conn.execute("SELECT bonus_balance FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+    conn.close()
+    bonus_bal = user["bonus_balance"] if user else 0
+
+    buttons = [
         [InlineKeyboardButton("💳 Karta orqali", callback_data="pay_card"),
          InlineKeyboardButton("💵 Naqd", callback_data="pay_cash")],
-    ])
+    ]
+    if bonus_bal >= 1000:
+        buttons.append([
+            InlineKeyboardButton(f"💎 Bonus hisobdan ({format_price(bonus_bal)})", callback_data="pay_bonus")
+        ])
+
     await update.message.reply_text(
-        f"📍 Manzil: <b>{address}</b>\n\n💳 To'lov usulini tanlang:",
-        reply_markup=kb,
+        f"📍 Manzil: <b>{address}</b>\n\n"
+        f"💳 To'lov usulini tanlang:"
+        + (f"\n\n💎 Bonus hisobingiz: <b>{format_price(bonus_bal)}</b>" if bonus_bal >= 1000 else ""),
+        reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML"
     )
     return ConversationHandler.END
@@ -878,7 +924,15 @@ async def place_order(update, context, screenshot=None):
     delivery_price = shop["delivery_price"] if shop else 0
     ctype = context.user_data.get("courier_type", "standard")
     premium_fee = float(get_setting("premium_courier_fee", "15000")) if ctype == "premium" else 0
-    total = subtotal - promo_discount + delivery_price + premium_fee
+
+    # Bonus balansni olish va ishlatish
+    conn_b = get_db()
+    user_row = conn_b.execute("SELECT bonus_balance FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+    conn_b.close()
+    bonus_balance = user_row["bonus_balance"] if user_row else 0
+    before_bonus = subtotal - promo_discount + delivery_price + premium_fee
+    bonus_used = min(bonus_balance, max(before_bonus, 0))
+    total = max(before_bonus - bonus_used, 0)
 
     commission_pct = float(get_setting("commission_percent", "10"))
     commission = total * commission_pct / 100
@@ -895,7 +949,7 @@ async def place_order(update, context, screenshot=None):
            subtotal, delivery_price, total, commission, courier_type, premium_fee)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (tg_id, shop_id, items_json, address, payment_method,
-         payment_status, screenshot, promo_code, promo_discount,
+         payment_status, screenshot, promo_code, promo_discount + bonus_used,
          subtotal, delivery_price, total, commission, ctype, premium_fee)
     )
     order_id = cur.lastrowid
@@ -903,6 +957,10 @@ async def place_order(update, context, screenshot=None):
     # Update promo usage
     if promo_code:
         conn.execute("UPDATE promo_codes SET used_count=used_count+1 WHERE code=?", (promo_code,))
+
+    # Bonus ayir
+    if bonus_used > 0:
+        conn.execute("UPDATE users SET bonus_balance=bonus_balance-? WHERE tg_id=?", (bonus_used, tg_id))
 
     conn.commit()
     conn.close()
@@ -912,12 +970,21 @@ async def place_order(update, context, screenshot=None):
     context.user_data.pop("promo_discount", None)
     context.user_data.pop("promo_code", None)
 
+    # Chegirma satrlari
+    discount_lines = ""
+    if promo_discount > 0:
+        discount_lines += f"🎫 Promo chegirma: -{format_price(promo_discount)}\n"
+    if bonus_used > 0:
+        discount_lines += f"💎 Bonus chegirma: -{format_price(bonus_used)}\n"
+
     order_text = (
         f"🆕 <b>Yangi buyurtma #{1000 + order_id}</b>\n\n"
         f"👤 Mijoz: {update.effective_user.full_name}\n"
         f"🏪 Do'kon: {shop['name'] if shop else 'N/A'}\n"
         f"📍 Manzil: {address}\n"
-        f"💰 Jami: {format_price(total)}\n"
+        f"💰 Mahsulotlar: {format_price(subtotal)}\n"
+        + discount_lines +
+        f"💵 Jami: <b>{format_price(total)}</b>\n"
         f"💳 To'lov: {'Karta' if payment_method == 'card' else 'Naqd'}\n"
         f"🚴 Kuryer: {'Premium ⚡' if ctype == 'premium' else 'Oddiy'}\n"
     )
@@ -1661,16 +1728,22 @@ async def my_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     status_txt = {"approved": "✅ Faol", "pending": "⏳ Kutilmoqda", "rejected": "❌ Rad etildi"}.get(shop["status"], shop["status"])
+    is_open = shop["is_open"] if "is_open" in shop.keys() else 1
+    open_txt = "🟢 Ochiq" if is_open else "🔴 Yopiq"
+    toggle_label = "🔴 Do'konni yopish" if is_open else "🟢 Do'konni ochish"
+
     text = (
         f"🏪 <b>{shop['name']}</b>\n\n"
         f"📝 {shop['description']}\n"
         f"📊 Holat: {status_txt}\n"
+        f"🚦 Holat: {open_txt}\n"
         f"⭐ Reyting: {shop['rating']:.1f} ({shop['total_reviews']} sharh)\n"
         f"🚚 Yetkazish: {format_price(shop['delivery_price'])}\n"
         f"⏰ Ish vaqti: {shop['work_hours']}\n"
     )
 
     kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(toggle_label, callback_data=f"toggle_shop_{shop['id']}")],
         [InlineKeyboardButton("📦 Mahsulotlar", callback_data=f"owner_products_{shop['id']}"),
          InlineKeyboardButton("➕ Mahsulot qo'sh", callback_data="add_product")],
         [InlineKeyboardButton("⚙️ Sozlamalar", callback_data=f"shop_settings_{shop['id']}"),
@@ -1678,6 +1751,31 @@ async def my_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("⬅️ Orqaga", callback_data="main_menu")],
     ])
     await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+
+async def toggle_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    shop_id = int(q.data.split("_")[2])
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    shop = conn.execute("SELECT * FROM shops WHERE id=? AND owner_tg_id=?", (shop_id, tg_id)).fetchone()
+    if not shop:
+        await q.answer("❌ Ruxsat yo'q!", show_alert=True)
+        conn.close()
+        return
+
+    new_state = 0 if (shop["is_open"] if "is_open" in shop.keys() else 1) else 1
+    conn.execute("UPDATE shops SET is_open=? WHERE id=?", (new_state, shop_id))
+    conn.commit()
+    conn.close()
+
+    state_txt = "🟢 Ochiq" if new_state else "🔴 Yopiq"
+    await q.answer(f"Do'kon {state_txt} qilindi!", show_alert=True)
+
+    # my_shop sahifasini yangilash
+    context.user_data["_refresh"] = True
+    await my_shop(update, context)
 
 async def shop_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1737,19 +1835,66 @@ async def set_work_hours(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     shop_id = int(q.data.split("_")[2])
     context.user_data["setting_shop_id"] = shop_id
-    await q.edit_message_text("⏰ Ish vaqtini kiriting (masalan: 09:00-22:00):")
+
+    conn = get_db()
+    shop = conn.execute("SELECT work_hours FROM shops WHERE id=?", (shop_id,)).fetchone()
+    conn.close()
+    current = shop["work_hours"] if shop else "09:00-22:00"
+
+    await q.edit_message_text(
+        f"⏰ <b>Ish vaqtini sozlash</b>\n\n"
+        f"📌 Joriy vaqt: <b>{current}</b>\n\n"
+        f"Yangi ish vaqtini kiriting:\n"
+        f"<i>Format: <code>HH:MM-HH:MM</code>\n"
+        f"Masalan: <code>07:00-23:00</code>\n"
+        f"Tungi (ertasiga): <code>22:00-02:00</code></i>",
+        parse_mode="HTML",
+        reply_markup=back_kb(f"shop_settings_{shop_id}")
+    )
     return WAITING_WORK_HOURS
 
 async def got_work_hours(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hours = update.message.text.strip()
     shop_id = context.user_data.pop("setting_shop_id", None)
+
+    # Format tekshiruvi
+    import re
+    if not re.match(r"^\d{1,2}:\d{2}-\d{1,2}:\d{2}$", hours):
+        await update.message.reply_text(
+            "❌ Noto'g'ri format!\n"
+            "To'g'ri format: <code>07:00-23:00</code>",
+            parse_mode="HTML"
+        )
+        return WAITING_WORK_HOURS
+
+    try:
+        open_t, close_t = hours.split("-")
+        oh, om = map(int, open_t.split(":"))
+        ch, cm = map(int, close_t.split(":"))
+        if not (0 <= oh <= 23 and 0 <= om <= 59 and 0 <= ch <= 23 and 0 <= cm <= 59):
+            raise ValueError
+    except:
+        await update.message.reply_text(
+            "❌ Noto'g'ri vaqt! Soat 0-23, daqiqa 0-59 bo'lishi kerak.",
+            parse_mode="HTML"
+        )
+        return WAITING_WORK_HOURS
+
     if shop_id:
         conn = get_db()
         conn.execute("UPDATE shops SET work_hours=? WHERE id=?", (hours, shop_id))
         conn.commit()
         conn.close()
 
-    await update.message.reply_text(f"✅ Ish vaqti {hours} ga o'zgartirildi!", reply_markup=back_kb("my_shop"))
+    await update.message.reply_text(
+        f"✅ <b>Ish vaqti saqlandi!</b>\n\n"
+        f"⏰ <b>{hours}</b>\n\n"
+        f"Bot avtomatik ravishda:\n"
+        f"• <b>{open_t}</b> da do'konni ochadi 🟢\n"
+        f"• <b>{close_t}</b> da do'konni yopadi 🔴",
+        parse_mode="HTML",
+        reply_markup=back_kb("my_shop")
+    )
     return ConversationHandler.END
 
 # ─── TO'LOV TIZIMI SOZLAMALARI ─────────────────────────────────────────────────
@@ -2549,6 +2694,10 @@ async def admin_shop_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif s["status"] == "approved":
         buttons.append([InlineKeyboardButton("🚫 Bloklash", callback_data=f"admin_shop_reject_{shop_id}")])
 
+    is_open = s["is_open"] if "is_open" in s.keys() else 1
+    open_txt = "🟢 Ochiq" if is_open else "🔴 Yopiq"
+    admin_toggle_label = "🔴 Yopish" if is_open else "🟢 Ochish"
+    buttons.append([InlineKeyboardButton(f"{admin_toggle_label} (admin)", callback_data=f"admin_toggle_shop_{shop_id}")])
     buttons.append([InlineKeyboardButton("💰 Obuna % sozlash", callback_data=f"admin_sub_{shop_id}")])
     buttons.append([InlineKeyboardButton("💳 To'lov tizimini tahrirlash", callback_data=f"admin_set_payment_{shop_id}")])
     buttons.append([InlineKeyboardButton("🗑 Do'konni o'chirish", callback_data=f"admin_shop_delete_{shop_id}")])
@@ -2582,6 +2731,7 @@ async def admin_shop_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📝 {s['description']}\n"
         f"👤 Egasi ID: {s['owner_tg_id']}\n"
         f"📊 Holat: {s['status']}\n"
+        f"🚦 Do'kon: {open_txt}\n"
         f"⭐ {s['rating']:.1f} ({s['total_reviews']} sharh)"
         f"{card_text}"
         f"{sub_text}",
@@ -2653,6 +2803,41 @@ async def admin_shop_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🗑 Do'kon muvaffaqiyatli o'chirildi.",
         reply_markup=back_kb("admin_shops")
     )
+
+async def admin_toggle_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    shop_id = int(q.data.split("_")[3])
+
+    conn = get_db()
+    shop = conn.execute("SELECT * FROM shops WHERE id=?", (shop_id,)).fetchone()
+    if not shop:
+        conn.close()
+        return
+
+    new_state = 0 if (shop["is_open"] if "is_open" in shop.keys() else 1) else 1
+    conn.execute("UPDATE shops SET is_open=? WHERE id=?", (new_state, shop_id))
+    conn.commit()
+
+    # Do'kon egasini xabardor qil
+    state_txt = "🟢 Ochiq" if new_state else "🔴 Yopiq"
+    try:
+        await context.bot.send_message(
+            shop["owner_tg_id"],
+            f"⚠️ <b>Do'koningiz holati o'zgartirildi!</b>\n\n"
+            f"🏪 {shop['name']}\n"
+            f"🚦 Yangi holat: <b>{state_txt}</b>\n\n"
+            f"{'Endi mijozlar zakaz bera oladi.' if new_state else 'Mijozlar hozir zakaz bera olmaydi.'}",
+            parse_mode="HTML"
+        )
+    except:
+        pass
+    conn.close()
+
+    await q.answer(f"Do'kon {state_txt} qilindi!", show_alert=True)
+    # Sahifani yangilash
+    q.data = f"admin_shop_{shop_id}"
+    await admin_shop_detail(update, context)
 
 # ─── ADMIN OBUNA TIZIMI (30 KUNLIK %) ─────────────────────────────────────────
 async def admin_sub_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2746,6 +2931,66 @@ async def got_sub_percent(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     return ConversationHandler.END
+
+async def auto_open_close_shops(bot):
+    """Har daqiqa ishga tushadi — ish vaqtiga qarab do'konni ochadi/yopadi"""
+    import re
+    now = datetime.now()
+    current_minutes = now.hour * 60 + now.minute
+
+    conn = get_db()
+    shops = conn.execute(
+        "SELECT id, name, owner_tg_id, work_hours, is_open FROM shops WHERE status='approved'"
+    ).fetchall()
+
+    for shop in shops:
+        wh = shop["work_hours"]
+        if not wh or "-" not in wh:
+            continue
+        if not re.match(r"^\d{1,2}:\d{2}-\d{1,2}:\d{2}$", wh):
+            continue
+
+        try:
+            open_t, close_t = wh.split("-")
+            oh, om = map(int, open_t.split(":"))
+            ch, cm = map(int, close_t.split(":"))
+        except:
+            continue
+
+        open_min = oh * 60 + om
+        close_min = ch * 60 + cm
+        is_open = shop["is_open"] if shop["is_open"] is not None else 1
+
+        # Tungi vaqt (masalan 22:00-02:00)
+        if open_min < close_min:
+            should_open = open_min <= current_minutes < close_min
+        else:
+            should_open = current_minutes >= open_min or current_minutes < close_min
+
+        # Holat o'zgargan bo'lsagina yangilash
+        if should_open and not is_open:
+            conn.execute("UPDATE shops SET is_open=1 WHERE id=?", (shop["id"],))
+            try:
+                await bot.send_message(
+                    shop["owner_tg_id"],
+                    f"🟢 <b>Do'koningiz ochildi!</b>\n🏪 {shop['name']}\n⏰ Ish vaqti: {wh}",
+                    parse_mode="HTML"
+                )
+            except:
+                pass
+        elif not should_open and is_open:
+            conn.execute("UPDATE shops SET is_open=0 WHERE id=?", (shop["id"],))
+            try:
+                await bot.send_message(
+                    shop["owner_tg_id"],
+                    f"🔴 <b>Do'koningiz yopildi!</b>\n🏪 {shop['name']}\n⏰ Ish vaqti: {wh}",
+                    parse_mode="HTML"
+                )
+            except:
+                pass
+
+    conn.commit()
+    conn.close()
 
 async def check_subscriptions(context):
     """Har kuni ishga tushadigan: muddati o'tgan obunalarni tekshiradi"""
@@ -3171,42 +3416,179 @@ async def admin_promos(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def create_promo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+    context.user_data.pop("new_promo", None)
     await q.edit_message_text(
-        "🎫 Promo kod ma'lumotlarini kiriting:\n\n"
-        "Format: KOD|tur(percent/fixed)|qiymat|limit|kun\n"
-        "Masalan: SUMMER25|percent|25|100|30"
+        "🎫 <b>Yangi promo kod yaratish</b>\n\n"
+        "<b>1-qadam</b> / 6\n\n"
+        "✏️ Promo kod nomini kiriting:\n"
+        "<i>Faqat lotin harflar va raqamlar. Masalan: YOZI25, CHEGIRMA10</i>",
+        parse_mode="HTML",
+        reply_markup=back_kb("admin_promos")
     )
-    return WAITING_PROMO_CODE_CREATE
+    return WAITING_PROMO_CODE
 
-async def got_promo_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def got_promo_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    code = update.message.text.strip().upper()
+    if len(code) < 2 or len(code) > 20:
+        await update.message.reply_text(
+            "❌ Kod 2-20 belgi orasida bo'lishi kerak. Qayta kiriting:"
+        )
+        return WAITING_PROMO_CODE
+
+    context.user_data["new_promo"] = {"code": code}
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Foiz chegirma (%)", callback_data="promo_type_percent")],
+        [InlineKeyboardButton("💵 Aniq summa (so'm)", callback_data="promo_type_fixed")],
+    ])
+    await update.message.reply_text(
+        f"✅ Kod: <b>{code}</b>\n\n"
+        f"<b>2-qadam</b> / 6\n\n"
+        f"💰 Chegirma turini tanlang:\n\n"
+        f"📊 <b>Foiz</b> — buyurtma summasidan % oladi\n"
+        f"💵 <b>Aniq summa</b> — har doim belgilangan so'm chegiradi",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+    return WAITING_PROMO_TYPE
+
+async def got_promo_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    dtype = "percent" if q.data == "promo_type_percent" else "fixed"
+    context.user_data["new_promo"]["type"] = dtype
+
+    if dtype == "percent":
+        label = "📊 Foiz chegirma (%)"
+        hint = "Masalan: <code>25</code>  →  25% chegirma"
+        unit = "%"
+    else:
+        label = "💵 Aniq summa (so'm)"
+        hint = "Masalan: <code>10000</code>  →  10 000 so'm chegirma"
+        unit = "so'm"
+
+    await q.edit_message_text(
+        f"✅ Tur: <b>{label}</b>\n\n"
+        f"<b>3-qadam</b> / 6\n\n"
+        f"🔢 Chegirma miqdorini kiriting ({unit}):\n"
+        f"<i>{hint}</i>",
+        parse_mode="HTML",
+        reply_markup=back_kb("admin_promos")
+    )
+    return WAITING_PROMO_VALUE
+
+async def got_promo_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        parts = update.message.text.strip().split("|")
-        code = parts[0].upper()
-        dtype = parts[1]
-        value = float(parts[2])
-        limit = int(parts[3])
-        days = int(parts[4])
-        expires = (datetime.now() + timedelta(days=days)).isoformat()
+        value = float(update.message.text.strip().replace(" ", "").replace(",", ""))
+        if value <= 0:
+            raise ValueError
+        promo = context.user_data.get("new_promo", {})
+        if promo.get("type") == "percent" and value > 100:
+            await update.message.reply_text("❌ Foiz 100% dan oshmasin. Qayta kiriting:")
+            return WAITING_PROMO_VALUE
     except:
-        await update.message.reply_text("❌ Format: KOD|tur|qiymat|limit|kun")
-        return WAITING_PROMO_CODE_CREATE
+        await update.message.reply_text("❌ Noto'g'ri raqam. Qayta kiriting:")
+        return WAITING_PROMO_VALUE
+
+    context.user_data["new_promo"]["value"] = value
+    dtype = context.user_data["new_promo"]["type"]
+    unit = "%" if dtype == "percent" else " so'm"
+
+    await update.message.reply_text(
+        f"✅ Chegirma: <b>{value:.0f}{unit}</b>\n\n"
+        f"<b>4-qadam</b> / 6\n\n"
+        f"💳 Minimal buyurtma summasi (so'm):\n"
+        f"<i>Koddan foydalanish uchun buyurtma kamida shu summadan oshishi kerak.\n"
+        f"Limit yo'q bo'lsa <code>0</code> kiriting.</i>",
+        parse_mode="HTML"
+    )
+    return WAITING_PROMO_MIN_AMOUNT
+
+async def got_promo_min_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amount = float(update.message.text.strip().replace(" ", "").replace(",", ""))
+        if amount < 0:
+            raise ValueError
+    except:
+        await update.message.reply_text("❌ Noto'g'ri raqam. 0 yoki musbat son kiriting:")
+        return WAITING_PROMO_MIN_AMOUNT
+
+    context.user_data["new_promo"]["min_amount"] = amount
+
+    min_text = f"{amount:,.0f} so'mdan yuqori buyurtmalarda" if amount > 0 else "barcha buyurtmalarda"
+
+    await update.message.reply_text(
+        f"✅ Minimal summa: <b>{format_price(amount) if amount > 0 else 'Cheklovsiz'}</b>\n\n"
+        f"<b>5-qadam</b> / 6\n\n"
+        f"👥 Necha marta ishlatish mumkin? (foydalanish limiti)\n"
+        f"<i>Masalan: <code>100</code>  →  100 marta ishlatiladi</i>",
+        parse_mode="HTML"
+    )
+    return WAITING_PROMO_LIMIT
+
+async def got_promo_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        limit = int(update.message.text.strip())
+        if limit <= 0:
+            raise ValueError
+    except:
+        await update.message.reply_text("❌ Noto'g'ri raqam. Butun musbat son kiriting:")
+        return WAITING_PROMO_LIMIT
+
+    context.user_data["new_promo"]["limit"] = limit
+
+    await update.message.reply_text(
+        f"✅ Limit: <b>{limit} marta</b>\n\n"
+        f"<b>6-qadam</b> / 6\n\n"
+        f"📅 Necha kun amal qiladi?\n"
+        f"<i>Masalan: <code>30</code>  →  30 kun</i>",
+        parse_mode="HTML"
+    )
+    return WAITING_PROMO_DAYS
+
+async def got_promo_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        days = int(update.message.text.strip())
+        if days <= 0:
+            raise ValueError
+    except:
+        await update.message.reply_text("❌ Noto'g'ri raqam. Kunlar sonini kiriting:")
+        return WAITING_PROMO_DAYS
+
+    promo = context.user_data.pop("new_promo", {})
+    code = promo.get("code", "")
+    dtype = promo.get("type", "percent")
+    value = promo.get("value", 0)
+    limit = promo.get("limit", 100)
+    min_amount = promo.get("min_amount", 0)
+    expires = (datetime.now() + timedelta(days=days)).isoformat()
+    unit = "%" if dtype == "percent" else " so'm"
 
     conn = get_db()
     try:
         conn.execute(
-            "INSERT INTO promo_codes (code, discount_type, discount_value, max_uses, expires_at) VALUES (?, ?, ?, ?, ?)",
-            (code, dtype, value, limit, expires)
+            "INSERT INTO promo_codes (code, discount_type, discount_value, max_uses, expires_at, min_order_amount) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (code, dtype, value, limit, expires, min_amount)
         )
         conn.commit()
+        min_text = format_price(min_amount) if min_amount > 0 else "Cheklovsiz"
         await update.message.reply_text(
-            f"✅ Promo kod yaratildi!\n🎫 Kod: <code>{code}</code>\n"
-            f"💰 Chegirma: {value}{'%' if dtype == 'percent' else ' so\'m'}\n"
-            f"📅 {days} kun amal qiladi",
+            f"🎉 <b>Promo kod yaratildi!</b>\n\n"
+            f"🎫 Kod: <code>{code}</code>\n"
+            f"💰 Chegirma: <b>{value:.0f}{unit}</b>\n"
+            f"💳 Minimal summa: <b>{min_text}</b>\n"
+            f"👥 Limit: <b>{limit} marta</b>\n"
+            f"📅 Muddat: <b>{days} kun</b> ({expires[:10]} gacha)",
             parse_mode="HTML",
             reply_markup=back_kb("admin_promos")
         )
     except:
-        await update.message.reply_text("❌ Bu kod allaqachon mavjud.")
+        await update.message.reply_text(
+            f"❌ <b>{code}</b> kodi allaqachon mavjud!",
+            parse_mode="HTML",
+            reply_markup=back_kb("admin_promos")
+        )
     finally:
         conn.close()
 
@@ -3437,7 +3819,17 @@ def main():
                     await check_subscriptions(FakeContext())
                 except Exception as e:
                     logger.error(f"Obuna tekshiruvida xato: {e}")
+
+        async def shop_hours_loop():
+            while True:
+                try:
+                    await auto_open_close_shops(application.bot)
+                except Exception as e:
+                    logger.error(f"Ish vaqti tekshiruvida xato: {e}")
+                await asyncio.sleep(60)  # Har 1 daqiqada
+
         asyncio.create_task(subscription_loop())
+        asyncio.create_task(shop_hours_loop())
 
     app = Application.builder().token(BOT_TOKEN).post_init(on_startup).build()
 
@@ -3518,7 +3910,14 @@ def main():
 
     promo_create_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(create_promo_start, pattern="^create_promo$")],
-        states={WAITING_PROMO_CODE_CREATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_promo_create)]},
+        states={
+            WAITING_PROMO_CODE:       [MessageHandler(filters.TEXT & ~filters.COMMAND, got_promo_code)],
+            WAITING_PROMO_TYPE:       [CallbackQueryHandler(got_promo_type, pattern="^promo_type_")],
+            WAITING_PROMO_VALUE:      [MessageHandler(filters.TEXT & ~filters.COMMAND, got_promo_value)],
+            WAITING_PROMO_MIN_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_promo_min_amount)],
+            WAITING_PROMO_LIMIT:      [MessageHandler(filters.TEXT & ~filters.COMMAND, got_promo_limit)],
+            WAITING_PROMO_DAYS:       [MessageHandler(filters.TEXT & ~filters.COMMAND, got_promo_days)],
+        },
         fallbacks=[],
         per_message=False,
     )
@@ -3701,6 +4100,8 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_shop_delete, pattern=r"^admin_shop_delete_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_set_payment_start, pattern=r"^admin_set_payment_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_sub_settings, pattern=r"^admin_sub_\d+$"))
+    app.add_handler(CallbackQueryHandler(toggle_shop, pattern=r"^toggle_shop_\d+$"))
+    app.add_handler(CallbackQueryHandler(admin_toggle_shop, pattern=r"^admin_toggle_shop_\d+$"))
 
     logger.info("🚀 OsonSavdo Bot ishga tushdi!")
     app.run_polling(drop_pending_updates=True)
