@@ -276,6 +276,8 @@ def migrate_db():
         c.execute("ALTER TABLE shops ADD COLUMN is_open INTEGER DEFAULT 1")
     except:
         pass
+    # NULL qiymatlarni tuzatish
+    c.execute("UPDATE shops SET is_open=1 WHERE is_open IS NULL")
     try:
         c.execute("""CREATE TABLE IF NOT EXISTS shop_subscriptions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2939,6 +2941,10 @@ async def auto_open_close_shops(bot):
     current_minutes = now.hour * 60 + now.minute
 
     conn = get_db()
+    # NULL bo'lgan is_open larni 1 ga o'zgartir
+    conn.execute("UPDATE shops SET is_open=1 WHERE is_open IS NULL")
+    conn.commit()
+
     shops = conn.execute(
         "SELECT id, name, owner_tg_id, work_hours, is_open FROM shops WHERE status='approved'"
     ).fetchall()
@@ -2959,7 +2965,7 @@ async def auto_open_close_shops(bot):
 
         open_min = oh * 60 + om
         close_min = ch * 60 + cm
-        is_open = shop["is_open"] if shop["is_open"] is not None else 1
+        is_open = 1 if shop["is_open"] is None else int(shop["is_open"])
 
         # Tungi vaqt (masalan 22:00-02:00)
         if open_min < close_min:
@@ -3821,12 +3827,17 @@ def main():
                     logger.error(f"Obuna tekshiruvida xato: {e}")
 
         async def shop_hours_loop():
+            # Darhol bir marta tekshir
+            try:
+                await auto_open_close_shops(application.bot)
+            except Exception as e:
+                logger.error(f"Ish vaqti tekshiruvida xato: {e}")
             while True:
+                await asyncio.sleep(60)  # Har 1 daqiqada
                 try:
                     await auto_open_close_shops(application.bot)
                 except Exception as e:
                     logger.error(f"Ish vaqti tekshiruvida xato: {e}")
-                await asyncio.sleep(60)  # Har 1 daqiqada
 
         asyncio.create_task(subscription_loop())
         asyncio.create_task(shop_hours_loop())
