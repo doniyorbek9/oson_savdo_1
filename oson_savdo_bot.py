@@ -1210,9 +1210,15 @@ async def place_order(update, context, screenshot=None):
     if shop:
         try:
             items_list = "\n".join([f"  • {v['name']} x{v['qty']} = {format_price(v['price'] * v['qty'])}" for v in cart.values()])
+            conn_ph = get_db()
+            user_ph = conn_ph.execute("SELECT phone_number FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+            conn_ph.close()
+            mijoz_phone = user_ph["phone_number"] if user_ph and user_ph.get("phone_number") else "Kiritilmagan"
+
             shop_notify_text = (
                 f"🛎 <b>Yangi buyurtma #{1000 + order_id}!</b>\n\n"
                 f"👤 Mijoz: {update.effective_user.full_name}\n"
+                f"📱 Telefon: <code>{mijoz_phone}</code>\n"
                 f"📦 Mahsulotlar:\n{items_list}\n\n"
                 f"📍 Manzil: {address}\n"
                 f"💰 Mahsulotlar: {format_price(subtotal)}\n"
@@ -1328,6 +1334,8 @@ async def order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons.append([InlineKeyboardButton("🔄 Qayta buyurtma", callback_data=f"reorder_{order_id}")])
     if o["status"] in ("new", "confirmed"):
         buttons.append([InlineKeyboardButton("❌ Buyurtmani bekor qilish", callback_data=f"cancel_order_{order_id}")])
+    if o["status"] in ("cancelled", "rejected"):
+        buttons.append([InlineKeyboardButton("🗑 Buyurtmani o'chirish", callback_data=f"delete_order_{order_id}")])
 
     buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="my_orders")])
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
@@ -1399,6 +1407,34 @@ async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ─── ADMIN ORDER CONFIRM/REJECT ────────────────────────────────────────────────
+async def delete_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    order_id = int(q.data.split("_")[2])
+    tg_id = update.effective_user.id
+
+    conn = get_db()
+    o = conn.execute("SELECT * FROM orders WHERE id=? AND user_tg_id=?", (order_id, tg_id)).fetchone()
+    if not o:
+        await q.answer("Buyurtma topilmadi!", show_alert=True)
+        conn.close()
+        return
+
+    if o["status"] not in ("cancelled", "rejected"):
+        await q.answer("Faqat bekor qilingan buyurtmalarni o'chirish mumkin!", show_alert=True)
+        conn.close()
+        return
+
+    conn.execute("DELETE FROM orders WHERE id=?", (order_id,))
+    conn.commit()
+    conn.close()
+
+    await q.edit_message_text(
+        "🗑 <b>Buyurtma o'chirildi.</b>",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📦 Buyurtmalarim", callback_data="my_orders")]]),
+        parse_mode="HTML"
+    )
+
 async def admin_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -1672,9 +1708,11 @@ async def profile_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     ref_link = f"https://t.me/OsonSavdoBot?start={user['referral_code']}"
+    phone = user['phone_number'] if user.get('phone_number') else "Kiritilmagan"
     text = (
         f"👤 <b>Profilim</b>\n\n"
         f"👤 Ism: {user['full_name']}\n"
+        f"📱 Telefon: <code>{phone}</code>\n"
         f"📦 Buyurtmalar: {user['total_orders']}\n"
         f"💰 Jami sarf: {format_price(user['total_spent'])}\n"
         f"⭐ Reyting: {user['rating']:.1f}\n"
@@ -3480,12 +3518,68 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     users = conn.execute("SELECT * FROM users ORDER BY id DESC LIMIT 20").fetchall()
     conn.close()
 
-    text = "👥 <b>Foydalanuvchilar (so'nggi 20):</b>\n\n"
+    if not users:
+        await q.edit_message_text("👥 Foydalanuvchilar yo'q.", reply_markup=back_kb("admin_panel"))
+        return
+
+    buttons = []
     for u in users:
         role = u["role"] or "customer"
-        text += f"• {u['full_name']} [{role}] — {u['total_orders']} buyurtma\n"
+        role_icon = {"admin": "⚙️", "shop_owner": "🏪", "courier": "🚴", "operator": "🎙"}.get(role, "👤")
+        buttons.append([InlineKeyboardButton(
+            f"{role_icon} {u['full_name']} — {u['total_orders']} buyurtma",
+            callback_data=f"admin_user_{u['tg_id']}"
+        )])
+    buttons.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_panel")])
 
-    await q.edit_message_text(text, reply_markup=back_kb("admin_panel"), parse_mode="HTML")
+    await q.edit_message_text(
+        "👥 <b>Foydalanuvchilar (so'nggi 20):</b>",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML"
+    )
+
+async def admin_user_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    user_tg_id = int(q.data.split("_")[2])
+
+    conn = get_db()
+    u = conn.execute("SELECT * FROM users WHERE tg_id=?", (user_tg_id,)).fetchone()
+    orders = conn.execute(
+        "SELECT COUNT(*) as cnt, SUM(total) as total FROM orders WHERE user_tg_id=? AND status='delivered'",
+        (user_tg_id,)
+    ).fetchone()
+    conn.close()
+
+    if not u:
+        await q.answer("Topilmadi!", show_alert=True)
+        return
+
+    role = u["role"] or "customer"
+    role_names = {"admin": "Admin", "shop_owner": "Do'kon egasi", "courier": "Kuryer", "operator": "Operator", "customer": "Mijoz"}
+    phone = u["phone_number"] if u.get("phone_number") else "Kiritilmagan"
+    username = f"@{u['username']}" if u.get("username") else "Yo'q"
+    total_spent = orders["total"] or 0
+
+    text = (
+        f"👤 <b>Foydalanuvchi ma'lumotlari</b>\n\n"
+        f"👤 Ism: <b>{u['full_name']}</b>\n"
+        f"🆔 Telegram ID: <code>{u['tg_id']}</code>\n"
+        f"📱 Telefon: <code>{phone}</code>\n"
+        f"👤 Username: {username}\n"
+        f"🎭 Rol: <b>{role_names.get(role, role)}</b>\n"
+        f"📦 Jami buyurtmalar: <b>{u['total_orders']}</b>\n"
+        f"✅ Yetkazilgan: <b>{orders['cnt']}</b>\n"
+        f"💰 Jami sarflagan: <b>{format_price(total_spent)}</b>\n"
+        f"💎 Bonus balans: <b>{format_price(u['bonus_balance'])}</b>\n"
+        f"⭐ Reyting: <b>{u['rating']:.1f}</b>\n"
+        f"📅 Ro'yxatdan: {u['created_at'][:10]}\n"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_users")]
+    ])
+    await q.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
 
 async def admin_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -4441,6 +4535,7 @@ def main():
     app.add_handler(CallbackQueryHandler(order_detail, pattern=r"^order_detail_\d+$"))
     app.add_handler(CallbackQueryHandler(reorder, pattern=r"^reorder_\d+$"))
     app.add_handler(CallbackQueryHandler(cancel_order, pattern=r"^cancel_order_\d+$"))
+    app.add_handler(CallbackQueryHandler(delete_order, pattern=r"^delete_order_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_confirm_order, pattern=r"^admin_confirm_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_reject_order, pattern=r"^admin_reject_\d+$"))
     app.add_handler(CallbackQueryHandler(shop_confirm_order, pattern=r"^shop_confirm_\d+$"))
@@ -4471,6 +4566,7 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_shop_approve, pattern=r"^admin_shop_approve_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_shop_reject, pattern=r"^admin_shop_reject_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_users, pattern="^admin_users$"))
+    app.add_handler(CallbackQueryHandler(admin_user_detail, pattern=r"^admin_user_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_orders, pattern="^admin_orders$"))
     app.add_handler(CallbackQueryHandler(admin_order_detail, pattern=r"^admin_order_\d+$"))
     app.add_handler(CallbackQueryHandler(admin_couriers, pattern="^admin_couriers$"))
