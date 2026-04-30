@@ -17,6 +17,12 @@ from datetime import datetime, timedelta, time as dtime
 from collections import deque
 from typing import Optional
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv("/data/.env")
+except ImportError:
+    pass
+
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     InputFile, ReplyKeyboardRemove
@@ -34,9 +40,9 @@ except ImportError:
     EXCEL_AVAILABLE = False
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
-BOT_TOKEN = "8609713083:AAFoh_EZqps4cSIs7sdTqdoWpFBox_Z-C80"
-ADMIN_ID = 7948989650
-DB_PATH = "oson_savdo.db"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+DB_PATH = os.getenv("DB_PATH", "/data/oson_savdo.db")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
