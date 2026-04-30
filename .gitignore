@@ -1,0 +1,5 @@
+oson_savdo.db
+oson_savdo_persistence*
+__pycache__/
+*.pyc
+*.log
